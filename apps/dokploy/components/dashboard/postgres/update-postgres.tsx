@@ -1,3 +1,9 @@
+import { standardSchemaResolver as zodResolver } from "@hookform/resolvers/standard-schema";
+import { PenBox } from "lucide-react";
+import { useEffect, useState } from "react";
+import { useForm } from "react-hook-form";
+import { toast } from "sonner";
+import { z } from "zod";
 import { AlertBlock } from "@/components/shared/alert-block";
 import { Button } from "@/components/ui/button";
 import {
@@ -20,12 +26,6 @@ import {
 import { Input } from "@/components/ui/input";
 import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/utils/api";
-import { zodResolver } from "@hookform/resolvers/zod";
-import { AlertTriangle, SquarePen } from "lucide-react";
-import { useEffect, useState } from "react";
-import { useForm } from "react-hook-form";
-import { toast } from "sonner";
-import { z } from "zod";
 
 const updatePostgresSchema = z.object({
 	name: z.string().min(1, {
@@ -43,7 +43,7 @@ interface Props {
 export const UpdatePostgres = ({ postgresId }: Props) => {
 	const [isOpen, setIsOpen] = useState(false);
 	const utils = api.useUtils();
-	const { mutateAsync, error, isError, isLoading } =
+	const { mutateAsync, error, isError, isPending } =
 		api.postgres.update.useMutation();
 	const { data } = api.postgres.one.useQuery(
 		{
@@ -76,14 +76,14 @@ export const UpdatePostgres = ({ postgresId }: Props) => {
 			description: formData.description || "",
 		})
 			.then(() => {
-				toast.success("Postgres updated succesfully");
+				toast.success("Postgres updated successfully");
 				utils.postgres.one.invalidate({
 					postgresId: postgresId,
 				});
 				setIsOpen(false);
 			})
 			.catch(() => {
-				toast.error("Error to update the postgres");
+				toast.error("Error updating Postgres");
 			})
 			.finally(() => {});
 	};
@@ -91,11 +91,15 @@ export const UpdatePostgres = ({ postgresId }: Props) => {
 	return (
 		<Dialog open={isOpen} onOpenChange={setIsOpen}>
 			<DialogTrigger asChild>
-				<Button variant="ghost">
-					<SquarePen className="size-4 text-muted-foreground" />
+				<Button
+					variant="ghost"
+					size="icon"
+					className="group hover:bg-blue-500/10 focus-visible:ring-2 focus-visible:ring-offset-2"
+				>
+					<PenBox className="size-3.5 text-primary group-hover:text-blue-500" />
 				</Button>
 			</DialogTrigger>
-			<DialogContent className="max-h-screen overflow-y-auto sm:max-w-lg">
+			<DialogContent className="sm:max-w-lg">
 				<DialogHeader>
 					<DialogTitle>Modify Postgres</DialogTitle>
 					<DialogDescription>Update the Postgres data</DialogDescription>
@@ -117,7 +121,7 @@ export const UpdatePostgres = ({ postgresId }: Props) => {
 										<FormItem>
 											<FormLabel>Name</FormLabel>
 											<FormControl>
-												<Input placeholder="Tesla" {...field} />
+												<Input placeholder="Vandelay Industries" {...field} />
 											</FormControl>
 
 											<FormMessage />
@@ -144,9 +148,10 @@ export const UpdatePostgres = ({ postgresId }: Props) => {
 								/>
 								<DialogFooter>
 									<Button
-										isLoading={isLoading}
+										isLoading={isPending}
 										form="hook-form-update-postgres"
 										type="submit"
+										className="flex items-center gap-1.5 focus-visible:ring-2 focus-visible:ring-offset-2"
 									>
 										Update
 									</Button>

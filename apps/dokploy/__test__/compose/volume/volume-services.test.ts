@@ -1,8 +1,10 @@
-import { generateRandomHash } from "@dokploy/server";
-import { addSuffixToVolumesInServices } from "@dokploy/server";
 import type { ComposeSpecification } from "@dokploy/server";
-import { load } from "js-yaml";
+import {
+	addSuffixToVolumesInServices,
+	generateRandomHash,
+} from "@dokploy/server";
 import { expect, test } from "vitest";
+import { parse } from "yaml";
 
 test("Generate random hash with 8 characters", () => {
 	const hash = generateRandomHash();
@@ -22,7 +24,7 @@ services:
 `;
 
 test("Add suffix to volumes declared directly in services", () => {
-	const composeData = load(composeFile1) as ComposeSpecification;
+	const composeData = parse(composeFile1) as ComposeSpecification;
 
 	const suffix = generateRandomHash();
 
@@ -37,6 +39,39 @@ test("Add suffix to volumes declared directly in services", () => {
 	const actualComposeData = { ...composeData, services: updatedComposeData };
 	expect(actualComposeData.services?.db?.volumes).toContain(
 		`db_data-${suffix}:/var/lib/postgresql/data`,
+	);
+});
+
+const composeFileAccessMode = `
+version: "3.8"
+
+services:
+  web:
+    image: nginx:alpine
+    volumes:
+      - web_config:/etc/nginx/conf.d:ro
+      - certs/sub:/etc/certs:Z
+`;
+
+test("Add suffix to volumes preserves access mode (:ro, :z, :Z)", () => {
+	const composeData = parse(composeFileAccessMode) as ComposeSpecification;
+
+	const suffix = generateRandomHash();
+
+	if (!composeData.services) {
+		return;
+	}
+
+	const updatedComposeData = addSuffixToVolumesInServices(
+		composeData.services,
+		suffix,
+	);
+
+	expect(updatedComposeData.web?.volumes).toContain(
+		`web_config-${suffix}:/etc/nginx/conf.d:ro`,
+	);
+	expect(updatedComposeData.web?.volumes).toContain(
+		`certs-${suffix}/sub:/etc/certs:Z`,
 	);
 });
 
@@ -57,7 +92,7 @@ volumes:
 `;
 
 test("Add suffix to volumes declared directly in services (Case 2)", () => {
-	const composeData = load(composeFileTypeVolume) as ComposeSpecification;
+	const composeData = parse(composeFileTypeVolume) as ComposeSpecification;
 
 	const suffix = generateRandomHash();
 

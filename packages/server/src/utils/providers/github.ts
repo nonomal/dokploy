@@ -1,17 +1,75 @@
-import { createWriteStream } from "node:fs";
 import { join } from "node:path";
 import { paths } from "@dokploy/server/constants";
+import type { apiFindGithubBranches } from "@dokploy/server/db/schema";
+import { findGithubById, type Github } from "@dokploy/server/services/github";
 import type { InferResultType } from "@dokploy/server/types/with";
 import { createAppAuth } from "@octokit/auth-app";
 import { TRPCError } from "@trpc/server";
 import { Octokit } from "octokit";
-import { recreateDirectory } from "../filesystem/directory";
-import { spawnAsync } from "../process/spawnAsync";
+import { quote } from "shell-quote";
+import type { z } from "zod";
 
-import type { apiFindGithubBranches } from "@dokploy/server/db/schema";
-import type { Compose } from "@dokploy/server/services/compose";
-import { type Github, findGithubById } from "@dokploy/server/services/github";
-import { execAsyncRemote } from "../process/execAsync";
+export const DEFAULT_GITHUB_URL = "https://github.com";
+export const DEFAULT_GITHUB_API_URL = "https://api.github.com";
+
+export const parseGithubBaseUrl = (
+	githubUrl?: string | null,
+): { url: string } | { error: string } => {
+	const raw = githubUrl?.trim();
+	if (!raw) {
+		return { url: DEFAULT_GITHUB_URL };
+	}
+
+	const withScheme = /^[a-z][a-z0-9+.-]*:\/\//i.test(raw)
+		? raw
+		: `https://${raw}`;
+
+	let parsed: URL;
+	try {
+		parsed = new URL(withScheme);
+	} catch {
+		return { error: `"${raw}" is not a valid URL` };
+	}
+
+	if (parsed.protocol !== "https:") {
+		return { error: "Only https is supported for GitHub instances" };
+	}
+
+	// "acme.ghe.com." resolves the same as "acme.ghe.com", but the trailing dot
+	// would slip past the checks below.
+	if (parsed.hostname.endsWith(".")) {
+		parsed.hostname = parsed.hostname.replace(/\.+$/, "");
+	}
+
+	const { hostname } = parsed;
+
+	if (!hostname.includes(".")) {
+		return { error: `"${hostname}" is not a fully qualified hostname` };
+	}
+
+	return { url: `${parsed.protocol}//${parsed.host}` };
+};
+
+export const normalizeGithubUrl = (githubUrl?: string | null): string => {
+	const result = parseGithubBaseUrl(githubUrl);
+	return "url" in result ? result.url : DEFAULT_GITHUB_URL;
+};
+
+export const deriveGithubApiUrl = (githubUrl?: string | null): string => {
+	const normalized = normalizeGithubUrl(githubUrl);
+	const { protocol, host } = new URL(normalized);
+
+	if (host === "github.com" || host === "www.github.com") {
+		return DEFAULT_GITHUB_API_URL;
+	}
+
+	// Data residency tenants keep the api. prefix; GHES does not have one.
+	if (host === "ghe.com" || host.endsWith(".ghe.com")) {
+		return `${protocol}//api.${host}`;
+	}
+
+	return `${protocol}//${host}/api/v3`;
+};
 
 export const authGithub = (githubProvider: Github): Octokit => {
 	if (!haveGithubRequirements(githubProvider)) {
@@ -28,6 +86,7 @@ export const authGithub = (githubProvider: Github): Octokit => {
 			privateKey: githubProvider?.githubPrivateKey || "",
 			installationId: githubProvider?.githubInstallationId,
 		},
+		baseUrl: deriveGithubApiUrl(githubProvider?.githubUrl),
 	});
 
 	return octokit;
@@ -43,6 +102,49 @@ export const getGithubToken = async (
 	};
 
 	return installation.token;
+};
+
+/**
+ * Check if a GitHub user has write/admin permissions on a repository
+ * This is used to validate PR authors before allowing preview deployments
+ */
+export const checkUserRepositoryPermissions = async (
+	githubProvider: Github,
+	owner: string,
+	repo: string,
+	username: string,
+): Promise<{ hasWriteAccess: boolean; permission: string | null }> => {
+	try {
+		const octokit = authGithub(githubProvider);
+
+		// Check if user is a collaborator with write permissions
+		const { data: permission } =
+			await octokit.rest.repos.getCollaboratorPermissionLevel({
+				owner,
+				repo,
+				username,
+			});
+
+		// Allow only users with 'write', 'admin', or 'maintain' permissions
+		// Currently exists Read, Triage, Write, Maintain, Admin
+		const allowedPermissions = ["write", "admin", "maintain"];
+		const hasWriteAccess = allowedPermissions.includes(permission.permission);
+
+		return {
+			hasWriteAccess,
+			permission: permission.permission,
+		};
+	} catch (error) {
+		// If user is not a collaborator, GitHub API returns 404
+		console.warn(
+			`User ${username} is not a collaborator of ${owner}/${repo}:`,
+			error,
+		);
+		return {
+			hasWriteAccess: false,
+			permission: null,
+		};
+	}
 };
 
 export const haveGithubRequirements = (githubProvider: Github) => {
@@ -74,215 +176,65 @@ export type ApplicationWithGithub = InferResultType<
 >;
 
 export type ComposeWithGithub = InferResultType<"compose", { github: true }>;
-export const cloneGithubRepository = async (
-	entity: ApplicationWithGithub | ComposeWithGithub,
-	logPath: string,
-	isCompose = false,
-) => {
-	const { APPLICATIONS_PATH, COMPOSE_PATH } = paths();
-	const writeStream = createWriteStream(logPath, { flags: "a" });
-	const { appName, repository, owner, branch, githubId } = entity;
+
+interface CloneGithubRepository {
+	appName: string;
+	owner: string | null;
+	branch: string | null;
+	githubId: string | null;
+	repository: string | null;
+	type?: "application" | "compose";
+	enableSubmodules: boolean;
+	serverId: string | null;
+	outputPathOverride?: string;
+}
+export const cloneGithubRepository = async ({
+	type = "application",
+	...entity
+}: CloneGithubRepository) => {
+	let command = "set -e;";
+	const isCompose = type === "compose";
+	const {
+		appName,
+		repository,
+		owner,
+		branch,
+		githubId,
+		enableSubmodules,
+		serverId,
+		outputPathOverride,
+	} = entity;
+	const { APPLICATIONS_PATH, COMPOSE_PATH } = paths(!!serverId);
 
 	if (!githubId) {
-		throw new TRPCError({
-			code: "NOT_FOUND",
-			message: "GitHub Provider not found",
-		});
+		command += `echo "Error: ❌ Github Provider not found"; exit 1;`;
+
+		return command;
 	}
 
 	const requirements = getErrorCloneRequirements(entity);
 
 	// Check if requirements are met
 	if (requirements.length > 0) {
-		writeStream.write(
-			`\nGitHub Repository configuration failed for application: ${appName}\n`,
-		);
-		writeStream.write("Reasons:\n");
-		writeStream.write(requirements.join("\n"));
-		writeStream.end();
-		throw new TRPCError({
-			code: "BAD_REQUEST",
-			message: "Error: GitHub repository information is incomplete.",
-		});
+		command += `echo "GitHub Repository configuration failed for application: ${appName}"; echo "Reasons:"; echo "${requirements.join("\n")}"; exit 1;`;
+		return command;
 	}
 
 	const githubProvider = await findGithubById(githubId);
 	const basePath = isCompose ? COMPOSE_PATH : APPLICATIONS_PATH;
-	const outputPath = join(basePath, appName, "code");
+	const outputPath = outputPathOverride ?? join(basePath, appName, "code");
 	const octokit = authGithub(githubProvider);
 	const token = await getGithubToken(octokit);
-	const repoclone = `github.com/${owner}/${repository}.git`;
-	await recreateDirectory(outputPath);
-	const cloneUrl = `https://oauth2:${token}@${repoclone}`;
+	const cloneBase = new URL(normalizeGithubUrl(githubProvider.githubUrl));
+	const repoclone = `${cloneBase.host}/${owner}/${repository}.git`;
+	command += `rm -rf ${outputPath};`;
+	command += `mkdir -p ${outputPath};`;
+	const cloneUrl = `${cloneBase.protocol}//oauth2:${token}@${repoclone}`;
 
-	try {
-		writeStream.write(`\nClonning Repo ${repoclone} to ${outputPath}: ✅\n`);
-		await spawnAsync(
-			"git",
-			[
-				"clone",
-				"--branch",
-				branch!,
-				"--depth",
-				"1",
-				"--recurse-submodules",
-				cloneUrl,
-				outputPath,
-				"--progress",
-			],
-			(data) => {
-				if (writeStream.writable) {
-					writeStream.write(data);
-				}
-			},
-		);
-		writeStream.write(`\nCloned ${repoclone}: ✅\n`);
-	} catch (error) {
-		writeStream.write(`ERROR Clonning: ${error}: ❌`);
-		throw error;
-	} finally {
-		writeStream.end();
-	}
-};
+	command += `echo ${quote([`Cloning Repo ${repoclone} to ${outputPath}: ✅`])};`;
+	command += `git clone --branch ${quote([String(branch ?? "")])} --depth 1 ${enableSubmodules ? "--recurse-submodules" : ""} ${quote([String(cloneUrl ?? "")])} ${quote([String(outputPath ?? "")])} --progress;`;
 
-export const getGithubCloneCommand = async (
-	entity: ApplicationWithGithub | ComposeWithGithub,
-	logPath: string,
-	isCompose = false,
-) => {
-	const { appName, repository, owner, branch, githubId, serverId } = entity;
-
-	if (!serverId) {
-		throw new TRPCError({
-			code: "NOT_FOUND",
-			message: "Server not found",
-		});
-	}
-
-	if (!githubId) {
-		const command = `
-			echo  "Error: ❌ Github Provider not found" >> ${logPath};
-			exit 1;
-		`;
-
-		await execAsyncRemote(serverId, command);
-		throw new TRPCError({
-			code: "NOT_FOUND",
-			message: "GitHub Provider not found",
-		});
-	}
-
-	const requirements = getErrorCloneRequirements(entity);
-
-	// Build log messages
-	let logMessages = "";
-	if (requirements.length > 0) {
-		logMessages += `\nGitHub Repository configuration failed for application: ${appName}\n`;
-		logMessages += "Reasons:\n";
-		logMessages += requirements.join("\n");
-		const escapedLogMessages = logMessages
-			.replace(/\\/g, "\\\\")
-			.replace(/"/g, '\\"')
-			.replace(/\n/g, "\\n");
-
-		const bashCommand = `
-            echo "${escapedLogMessages}" >> ${logPath};
-            exit 1;  # Exit with error code
-        `;
-
-		await execAsyncRemote(serverId, bashCommand);
-		return;
-	}
-	const { COMPOSE_PATH, APPLICATIONS_PATH } = paths(true);
-	const githubProvider = await findGithubById(githubId);
-	const basePath = isCompose ? COMPOSE_PATH : APPLICATIONS_PATH;
-	const outputPath = join(basePath, appName, "code");
-	const octokit = authGithub(githubProvider);
-	const token = await getGithubToken(octokit);
-	const repoclone = `github.com/${owner}/${repository}.git`;
-	const cloneUrl = `https://oauth2:${token}@${repoclone}`;
-
-	const cloneCommand = `
-rm -rf ${outputPath};
-mkdir -p ${outputPath};
-if ! git clone --branch ${branch} --depth 1 --recurse-submodules --progress ${cloneUrl} ${outputPath} >> ${logPath} 2>&1; then
-	echo "❌ [ERROR] Fallo al clonar el repositorio ${repoclone}" >> ${logPath};
-	exit 1;
-fi
-echo "Cloned ${repoclone} to ${outputPath}: ✅" >> ${logPath};
-	`;
-
-	return cloneCommand;
-};
-
-export const cloneRawGithubRepository = async (entity: Compose) => {
-	const { appName, repository, owner, branch, githubId } = entity;
-
-	if (!githubId) {
-		throw new TRPCError({
-			code: "NOT_FOUND",
-			message: "GitHub Provider not found",
-		});
-	}
-	const { COMPOSE_PATH } = paths();
-	const githubProvider = await findGithubById(githubId);
-	const basePath = COMPOSE_PATH;
-	const outputPath = join(basePath, appName, "code");
-	const octokit = authGithub(githubProvider);
-	const token = await getGithubToken(octokit);
-	const repoclone = `github.com/${owner}/${repository}.git`;
-	await recreateDirectory(outputPath);
-	const cloneUrl = `https://oauth2:${token}@${repoclone}`;
-	try {
-		await spawnAsync("git", [
-			"clone",
-			"--branch",
-			branch!,
-			"--depth",
-			"1",
-			"--recurse-submodules",
-			cloneUrl,
-			outputPath,
-			"--progress",
-		]);
-	} catch (error) {
-		throw error;
-	}
-};
-
-export const cloneRawGithubRepositoryRemote = async (compose: Compose) => {
-	const { appName, repository, owner, branch, githubId, serverId } = compose;
-
-	if (!serverId) {
-		throw new TRPCError({
-			code: "NOT_FOUND",
-			message: "Server not found",
-		});
-	}
-	if (!githubId) {
-		throw new TRPCError({
-			code: "NOT_FOUND",
-			message: "GitHub Provider not found",
-		});
-	}
-
-	const { COMPOSE_PATH } = paths(true);
-	const githubProvider = await findGithubById(githubId);
-	const basePath = COMPOSE_PATH;
-	const outputPath = join(basePath, appName, "code");
-	const octokit = authGithub(githubProvider);
-	const token = await getGithubToken(octokit);
-	const repoclone = `github.com/${owner}/${repository}.git`;
-	const cloneUrl = `https://oauth2:${token}@${repoclone}`;
-	try {
-		const command = `
-			rm -rf ${outputPath};
-			git clone --branch ${branch} --depth 1 ${cloneUrl} ${outputPath}
-		`;
-		await execAsyncRemote(serverId, command);
-	} catch (error) {
-		throw error;
-	}
+	return command;
 };
 
 export const getGithubRepositories = async (githubId?: string) => {
@@ -299,6 +251,7 @@ export const getGithubRepositories = async (githubId?: string) => {
 			privateKey: githubProvider.githubPrivateKey,
 			installationId: githubProvider.githubInstallationId,
 		},
+		baseUrl: deriveGithubApiUrl(githubProvider.githubUrl),
 	});
 
 	const repositories = (await octokit.paginate(
@@ -311,7 +264,7 @@ export const getGithubRepositories = async (githubId?: string) => {
 };
 
 export const getGithubBranches = async (
-	input: typeof apiFindGithubBranches._type,
+	input: z.infer<typeof apiFindGithubBranches>,
 ) => {
 	if (!input.githubId) {
 		return [];
@@ -325,6 +278,7 @@ export const getGithubBranches = async (
 			privateKey: githubProvider.githubPrivateKey,
 			installationId: githubProvider.githubInstallationId,
 		},
+		baseUrl: deriveGithubApiUrl(githubProvider.githubUrl),
 	});
 
 	const branches = (await octokit.paginate(octokit.rest.repos.listBranches, {

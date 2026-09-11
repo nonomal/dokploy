@@ -1,3 +1,4 @@
+import { Area, AreaChart, CartesianGrid, XAxis, YAxis } from "recharts";
 import {
 	type ChartConfig,
 	ChartContainer,
@@ -5,14 +6,13 @@ import {
 	ChartTooltipContent,
 } from "@/components/ui/chart";
 import { api } from "@/utils/api";
-import {
-	Area,
-	AreaChart,
-	CartesianGrid,
-	ResponsiveContainer,
-	XAxis,
-	YAxis,
-} from "recharts";
+
+export interface RequestDistributionChartProps {
+	dateRange?: {
+		from: Date | undefined;
+		to: Date | undefined;
+	};
+}
 
 const chartConfig = {
 	views: {
@@ -24,57 +24,79 @@ const chartConfig = {
 	},
 } satisfies ChartConfig;
 
-export const RequestDistributionChart = () => {
-	const { data: stats } = api.settings.readStats.useQuery(undefined, {
-		refetchInterval: 1333,
-	});
+export const RequestDistributionChart = ({
+	dateRange,
+}: RequestDistributionChartProps) => {
+	const { data: stats } = api.settings.readStats.useQuery(
+		{
+			dateRange: dateRange
+				? {
+						start: dateRange.from?.toISOString(),
+						end: dateRange.to?.toISOString(),
+					}
+				: undefined,
+		},
+		{
+			refetchInterval: 1333,
+		},
+	);
 
 	return (
-		<ResponsiveContainer width="100%" height={200}>
-			<ChartContainer config={chartConfig}>
-				<AreaChart
-					accessibilityLayer
-					data={stats || []}
-					margin={{
-						left: 12,
-						right: 12,
-					}}
-				>
-					<CartesianGrid vertical={false} />
-					<XAxis
-						dataKey="hour"
-						tickLine={false}
-						axisLine={false}
-						tickMargin={8}
-						tickFormatter={(value) =>
-							new Date(value).toLocaleTimeString([], {
-								hour: "2-digit",
-								minute: "2-digit",
-							})
-						}
-					/>
-					<YAxis tickLine={false} axisLine={false} tickMargin={8} />
-					<ChartTooltip
-						cursor={false}
-						content={<ChartTooltipContent indicator="line" />}
-						labelFormatter={(value) =>
-							new Date(value).toLocaleString([], {
-								month: "short",
-								day: "numeric",
-								hour: "2-digit",
-								minute: "2-digit",
-							})
-						}
-					/>
-					<Area
-						dataKey="count"
-						type="natural"
-						fill="hsl(var(--chart-1))"
-						fillOpacity={0.4}
-						stroke="hsl(var(--chart-1))"
-					/>
-				</AreaChart>
-			</ChartContainer>
-		</ResponsiveContainer>
+		<ChartContainer
+			config={chartConfig}
+			className="aspect-auto h-[200px] w-full"
+		>
+			<AreaChart
+				accessibilityLayer
+				data={stats || []}
+				margin={{
+					top: 10,
+					left: 12,
+					right: 12,
+					bottom: 0,
+				}}
+			>
+				<CartesianGrid vertical={false} />
+				<XAxis
+					dataKey="hour"
+					tickLine={false}
+					axisLine={false}
+					tickMargin={8}
+					tickFormatter={(value) =>
+						new Date(value).toLocaleTimeString([], {
+							hour: "2-digit",
+							minute: "2-digit",
+						})
+					}
+				/>
+				<YAxis
+					tickLine={false}
+					axisLine={false}
+					tickMargin={8}
+					allowDataOverflow={false}
+					domain={[0, "auto"]}
+				/>
+				<ChartTooltip
+					cursor={false}
+					content={<ChartTooltipContent indicator="line" />}
+					labelFormatter={(value) =>
+						new Date(value).toLocaleString([], {
+							month: "short",
+							day: "numeric",
+							hour: "2-digit",
+							minute: "2-digit",
+						})
+					}
+				/>
+				<Area
+					dataKey="count"
+					type="monotone"
+					isAnimationActive={false}
+					fill="hsl(var(--chart-1))"
+					fillOpacity={0.4}
+					stroke="hsl(var(--chart-1))"
+				/>
+			</AreaChart>
+		</ChartContainer>
 	);
 };

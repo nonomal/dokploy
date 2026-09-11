@@ -1,4 +1,60 @@
-import { db } from "@/server/db";
+import {
+	CLEANUP_CRON_JOB,
+	checkGPUStatus,
+	checkPortInUse,
+	checkPostgresHealth,
+	checkTraefikHealth,
+	cleanupAll,
+	cleanupAllBackground,
+	cleanupBuilders,
+	cleanupContainers,
+	cleanupImages,
+	cleanupSystem,
+	cleanupVolumes,
+	DEFAULT_UPDATE_DATA,
+	findServerById,
+	getDockerDiskUsage,
+	getDokployImageTag,
+	getLogCleanupStatus,
+	getUpdateData,
+	getWebServerSettings,
+	IS_CLOUD,
+	parseRawConfig,
+	paths,
+	prepareEnvironmentVariables,
+	processLogs,
+	readConfig,
+	readConfigInPath,
+	readDirectory,
+	readEnvironmentVariables,
+	readMainConfig,
+	readMonitoringConfig,
+	readPorts,
+	recreateDirectory,
+	reloadDockerResource,
+	sendDockerCleanupNotifications,
+	setupGPUSupport,
+	spawnAsync,
+	startLogCleanup,
+	stopLogCleanup,
+	updateLetsEncryptEmail,
+	updateServerById,
+	updateServerTraefik,
+	updateWebServerSettings,
+	writeConfig,
+	writeMainConfig,
+	writeTraefikConfigInPath,
+	writeTraefikSetup,
+} from "@dokploy/server";
+import { db } from "@dokploy/server/db";
+import { checkPermission } from "@dokploy/server/services/permission";
+import { generateOpenApiDocument } from "@dokploy/trpc-openapi";
+import { TRPCError } from "@trpc/server";
+import { eq, sql } from "drizzle-orm";
+import { scheduledJobs, scheduleJob } from "node-schedule";
+import { parse, stringify } from "yaml";
+import { z } from "zod";
+import { audit } from "@/server/api/utils/audit";
 import {
 	apiAssignDomain,
 	apiEnableDashboard,
@@ -9,150 +65,203 @@ import {
 	apiServerSchema,
 	apiTraefikConfig,
 	apiUpdateDockerCleanup,
+	apiUpdateWebServerBuildsConcurrency,
+	projects,
+	server,
 } from "@/server/db/schema";
+import { cleanAllDeploymentQueue } from "@/server/queues/queueSetup";
 import { removeJob, schedule } from "@/server/utils/backup";
-import {
-	IS_CLOUD,
-	canAccessToTraefikFiles,
-	cleanStoppedContainers,
-	cleanUpDockerBuilder,
-	cleanUpSystemPrune,
-	cleanUpUnusedImages,
-	cleanUpUnusedVolumes,
-	execAsync,
-	execAsyncRemote,
-	findAdmin,
-	findAdminById,
-	findServerById,
-	getDokployImage,
-	initializeTraefik,
-	logRotationManager,
-	parseRawConfig,
-	paths,
-	prepareEnvironmentVariables,
-	processLogs,
-	pullLatestRelease,
-	readConfig,
-	readConfigInPath,
-	readDirectory,
-	readMainConfig,
-	readMonitoringConfig,
-	recreateDirectory,
-	sendDockerCleanupNotifications,
-	spawnAsync,
-	startService,
-	startServiceRemote,
-	stopService,
-	stopServiceRemote,
-	updateAdmin,
-	updateLetsEncryptEmail,
-	updateServerById,
-	updateServerTraefik,
-	writeConfig,
-	writeMainConfig,
-	writeTraefikConfigInPath,
-} from "@dokploy/server";
-import { generateOpenApiDocument } from "@dokploy/trpc-openapi";
-import { TRPCError } from "@trpc/server";
-import { sql } from "drizzle-orm";
-import { dump, load } from "js-yaml";
-import { scheduleJob, scheduledJobs } from "node-schedule";
-import { z } from "zod";
 import packageInfo from "../../../package.json";
 import { appRouter } from "../root";
 import {
 	adminProcedure,
 	createTRPCRouter,
+	enterpriseProcedure,
 	protectedProcedure,
 	publicProcedure,
 } from "../trpc";
 
 export const settingsRouter = createTRPCRouter({
-	reloadServer: adminProcedure.mutation(async () => {
+	getWebServerSettings: protectedProcedure.query(async () => {
+		if (IS_CLOUD) {
+			return null;
+		}
+		const settings = await getWebServerSettings();
+		return settings;
+	}),
+	reloadServer: adminProcedure.mutation(async ({ ctx }) => {
 		if (IS_CLOUD) {
 			return true;
 		}
-		const { stdout } = await execAsync(
-			"docker service inspect dokploy --format '{{.ID}}'",
-		);
-		await execAsync(`docker service update --force ${stdout.trim()}`);
+		await reloadDockerResource("dokploy", undefined, packageInfo.version);
+		await audit(ctx, {
+			action: "reload",
+			resourceType: "settings",
+			resourceName: "dokploy",
+		});
 		return true;
+	}),
+	cleanAllDeploymentQueue: adminProcedure.mutation(async ({ ctx }) => {
+		if (IS_CLOUD) {
+			return true;
+		}
+		const result = cleanAllDeploymentQueue();
+		await audit(ctx, {
+			action: "update",
+			resourceType: "settings",
+			resourceName: "clean-deployment-queue",
+		});
+		return result;
 	}),
 	reloadTraefik: adminProcedure
 		.input(apiServerSchema)
-		.mutation(async ({ input }) => {
-			try {
-				if (input?.serverId) {
-					await stopServiceRemote(input.serverId, "dokploy-traefik");
-					await startServiceRemote(input.serverId, "dokploy-traefik");
-				} else if (!IS_CLOUD) {
-					await stopService("dokploy-traefik");
-					await startService("dokploy-traefik");
-				}
-			} catch (err) {
-				console.error(err);
-			}
-
+		.mutation(async ({ input, ctx }) => {
+			// Run in background so the request returns immediately; avoids proxy timeouts.
+			void reloadDockerResource("dokploy-traefik", input?.serverId).catch(
+				(err) => {
+					console.error("reloadTraefik background:", err);
+				},
+			);
+			await audit(ctx, {
+				action: "reload",
+				resourceType: "settings",
+				resourceName: "dokploy-traefik",
+			});
 			return true;
 		}),
 	toggleDashboard: adminProcedure
 		.input(apiEnableDashboard)
-		.mutation(async ({ input }) => {
-			await initializeTraefik({
-				enableDashboard: input.enableDashboard,
+		.mutation(async ({ input, ctx }) => {
+			const ports = await readPorts("dokploy-traefik", input.serverId);
+			const env = await readEnvironmentVariables(
+				"dokploy-traefik",
+				input.serverId,
+			);
+			const preparedEnv = prepareEnvironmentVariables(env);
+			let newPorts = ports;
+			// If receive true, add 8080 to ports
+			if (input.enableDashboard) {
+				// Check if port 8080 is already in use before enabling dashboard
+				const portCheck = await checkPortInUse(8080, input.serverId);
+				if (portCheck.isInUse) {
+					const conflictInfo = portCheck.conflictingContainer
+						? ` by ${portCheck.conflictingContainer}`
+						: "";
+					throw new TRPCError({
+						code: "CONFLICT",
+						message: `Port 8080 is already in use${conflictInfo}. Please stop the conflicting service or use a different port for the Traefik dashboard.`,
+					});
+				}
+				newPorts.push({
+					targetPort: 8080,
+					publishedPort: 8080,
+					protocol: "tcp",
+				});
+			} else {
+				newPorts = ports.filter((port) => port.targetPort !== 8080);
+			}
+
+			// Run in background so the request returns immediately; client polls /api/health.
+			// Avoids proxy timeouts (520) while Traefik is recreated.
+			void writeTraefikSetup({
+				env: preparedEnv,
+				additionalPorts: newPorts,
 				serverId: input.serverId,
+			}).catch((err) => {
+				console.error("toggleDashboard background writeTraefikSetup:", err);
+			});
+			await audit(ctx, {
+				action: "update",
+				resourceType: "settings",
+				resourceName: "toggle-dashboard",
 			});
 			return true;
 		}),
-
 	cleanUnusedImages: adminProcedure
 		.input(apiServerSchema)
-		.mutation(async ({ input }) => {
-			await cleanUpUnusedImages(input?.serverId);
+		.mutation(async ({ input, ctx }) => {
+			await cleanupImages(input?.serverId);
+			await audit(ctx, {
+				action: "delete",
+				resourceType: "settings",
+				resourceName: "clean-unused-images",
+			});
 			return true;
 		}),
 	cleanUnusedVolumes: adminProcedure
 		.input(apiServerSchema)
-		.mutation(async ({ input }) => {
-			await cleanUpUnusedVolumes(input?.serverId);
+		.mutation(async ({ input, ctx }) => {
+			await cleanupVolumes(input?.serverId);
+			await audit(ctx, {
+				action: "delete",
+				resourceType: "settings",
+				resourceName: "clean-unused-volumes",
+			});
 			return true;
 		}),
 	cleanStoppedContainers: adminProcedure
 		.input(apiServerSchema)
-		.mutation(async ({ input }) => {
-			await cleanStoppedContainers(input?.serverId);
+		.mutation(async ({ input, ctx }) => {
+			await cleanupContainers(input?.serverId);
+			await audit(ctx, {
+				action: "delete",
+				resourceType: "settings",
+				resourceName: "clean-stopped-containers",
+			});
 			return true;
 		}),
 	cleanDockerBuilder: adminProcedure
 		.input(apiServerSchema)
-		.mutation(async ({ input }) => {
-			await cleanUpDockerBuilder(input?.serverId);
+		.mutation(async ({ input, ctx }) => {
+			await cleanupBuilders(input?.serverId);
+			await audit(ctx, {
+				action: "delete",
+				resourceType: "settings",
+				resourceName: "clean-docker-builder",
+			});
 		}),
 	cleanDockerPrune: adminProcedure
 		.input(apiServerSchema)
-		.mutation(async ({ input }) => {
-			await cleanUpSystemPrune(input?.serverId);
-			await cleanUpDockerBuilder(input?.serverId);
-
+		.mutation(async ({ input, ctx }) => {
+			await cleanupSystem(input?.serverId);
+			await cleanupBuilders(input?.serverId);
+			await audit(ctx, {
+				action: "delete",
+				resourceType: "settings",
+				resourceName: "clean-docker-prune",
+			});
 			return true;
 		}),
 	cleanAll: adminProcedure
 		.input(apiServerSchema)
-		.mutation(async ({ input }) => {
-			await cleanUpUnusedImages(input?.serverId);
-			await cleanStoppedContainers(input?.serverId);
-			await cleanUpDockerBuilder(input?.serverId);
-			await cleanUpSystemPrune(input?.serverId);
-
-			return true;
+		.mutation(async ({ input, ctx }) => {
+			// Execute cleanup in background and return immediately to avoid gateway timeouts
+			const result = await cleanupAllBackground(input?.serverId);
+			await audit(ctx, {
+				action: "delete",
+				resourceType: "settings",
+				resourceName: "clean-all",
+			});
+			return result;
 		}),
-	cleanMonitoring: adminProcedure.mutation(async () => {
+	cleanMonitoring: adminProcedure.mutation(async ({ ctx }) => {
 		if (IS_CLOUD) {
 			return true;
 		}
 		const { MONITORING_PATH } = paths();
 		await recreateDirectory(MONITORING_PATH);
+		await audit(ctx, {
+			action: "delete",
+			resourceType: "settings",
+			resourceName: "clean-monitoring",
+		});
 		return true;
+	}),
+	getDockerDiskUsage: adminProcedure.query(async () => {
+		if (IS_CLOUD) {
+			return [];
+		}
+		return getDockerDiskUsage();
 	}),
 	saveSSHPrivateKey: adminProcedure
 		.input(apiSaveSSHKey)
@@ -160,46 +269,59 @@ export const settingsRouter = createTRPCRouter({
 			if (IS_CLOUD) {
 				return true;
 			}
-			await updateAdmin(ctx.user.authId, {
+			await updateWebServerSettings({
 				sshPrivateKey: input.sshPrivateKey,
 			});
-
+			await audit(ctx, {
+				action: "update",
+				resourceType: "settings",
+				resourceName: "ssh-private-key",
+			});
 			return true;
 		}),
 	assignDomainServer: adminProcedure
 		.input(apiAssignDomain)
-		.mutation(async ({ ctx, input }) => {
+		.mutation(async ({ input, ctx }) => {
 			if (IS_CLOUD) {
 				return true;
 			}
-			const admin = await updateAdmin(ctx.user.authId, {
+			const settings = await updateWebServerSettings({
 				host: input.host,
-				...(input.letsEncryptEmail && {
-					letsEncryptEmail: input.letsEncryptEmail,
-				}),
+				letsEncryptEmail: input.letsEncryptEmail,
 				certificateType: input.certificateType,
+				https: input.https,
 			});
 
-			if (!admin) {
+			if (!settings) {
 				throw new TRPCError({
 					code: "NOT_FOUND",
-					message: "Admin not found",
+					message: "Web server settings not found",
 				});
 			}
 
-			updateServerTraefik(admin, input.host);
+			updateServerTraefik(settings, input.host);
 			if (input.letsEncryptEmail) {
 				updateLetsEncryptEmail(input.letsEncryptEmail);
 			}
 
-			return admin;
+			await audit(ctx, {
+				action: "update",
+				resourceType: "settings",
+				resourceName: "assign-domain-server",
+			});
+			return settings;
 		}),
 	cleanSSHPrivateKey: adminProcedure.mutation(async ({ ctx }) => {
 		if (IS_CLOUD) {
 			return true;
 		}
-		await updateAdmin(ctx.user.authId, {
+		await updateWebServerSettings({
 			sshPrivateKey: null,
+		});
+		await audit(ctx, {
+			action: "delete",
+			resourceType: "settings",
+			resourceName: "ssh-private-key",
 		});
 		return true;
 	}),
@@ -213,7 +335,7 @@ export const settingsRouter = createTRPCRouter({
 
 				const server = await findServerById(input.serverId);
 
-				if (server.adminId !== ctx.user.adminId) {
+				if (server.organizationId !== ctx.session?.activeOrganizationId) {
 					throw new TRPCError({
 						code: "UNAUTHORIZED",
 						message: "You are not authorized to access this server",
@@ -230,25 +352,25 @@ export const settingsRouter = createTRPCRouter({
 					}
 					if (IS_CLOUD) {
 						await schedule({
-							cronSchedule: "0 0 * * *",
+							cronSchedule: CLEANUP_CRON_JOB,
 							serverId: input.serverId,
 							type: "server",
 						});
 					} else {
-						scheduleJob(server.serverId, "0 0 * * *", async () => {
+						scheduleJob(server.serverId, CLEANUP_CRON_JOB, async () => {
 							console.log(
 								`Docker Cleanup ${new Date().toLocaleString()}] Running...`,
 							);
-							await cleanUpUnusedImages(server.serverId);
-							await cleanUpDockerBuilder(server.serverId);
-							await cleanUpSystemPrune(server.serverId);
-							await sendDockerCleanupNotifications();
+
+							await cleanupAll(server.serverId);
+
+							await sendDockerCleanupNotifications(server.organizationId);
 						});
 					}
 				} else {
 					if (IS_CLOUD) {
 						await removeJob({
-							cronSchedule: "0 0 * * *",
+							cronSchedule: CLEANUP_CRON_JOB,
 							serverId: input.serverId,
 							type: "server",
 						});
@@ -258,27 +380,21 @@ export const settingsRouter = createTRPCRouter({
 					}
 				}
 			} else if (!IS_CLOUD) {
-				const admin = await findAdminById(ctx.user.adminId);
-
-				if (admin.adminId !== ctx.user.adminId) {
-					throw new TRPCError({
-						code: "UNAUTHORIZED",
-						message: "You are not authorized to access this admin",
-					});
-				}
-				await updateAdmin(ctx.user.authId, {
+				const settingsUpdated = await updateWebServerSettings({
 					enableDockerCleanup: input.enableDockerCleanup,
 				});
 
-				if (admin.enableDockerCleanup) {
-					scheduleJob("docker-cleanup", "0 0 * * *", async () => {
+				if (settingsUpdated?.enableDockerCleanup) {
+					scheduleJob("docker-cleanup", CLEANUP_CRON_JOB, async () => {
 						console.log(
 							`Docker Cleanup ${new Date().toLocaleString()}] Running...`,
 						);
-						await cleanUpUnusedImages();
-						await cleanUpDockerBuilder();
-						await cleanUpSystemPrune();
-						await sendDockerCleanupNotifications();
+
+						await cleanupAll();
+
+						await sendDockerCleanupNotifications(
+							ctx.session.activeOrganizationId,
+						);
 					});
 				} else {
 					const currentJob = scheduledJobs["docker-cleanup"];
@@ -286,6 +402,77 @@ export const settingsRouter = createTRPCRouter({
 				}
 			}
 
+			await audit(ctx, {
+				action: "update",
+				resourceType: "settings",
+				resourceName: "docker-cleanup",
+			});
+			return true;
+		}),
+
+	updateRemoteServersOnly: enterpriseProcedure
+		.input(z.object({ remoteServersOnly: z.boolean() }))
+		.mutation(async ({ input, ctx }) => {
+			if (IS_CLOUD) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "This feature is only available for self-hosted instances",
+				});
+			}
+
+			await updateWebServerSettings({
+				remoteServersOnly: input.remoteServersOnly,
+			});
+
+			await audit(ctx, {
+				action: "update",
+				resourceType: "settings",
+				resourceName: "remote-servers-only",
+			});
+			return true;
+		}),
+
+	updateBuildsConcurrency: adminProcedure
+		.input(apiUpdateWebServerBuildsConcurrency)
+		.mutation(async ({ input, ctx }) => {
+			if (IS_CLOUD) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "This feature is only available for self-hosted instances",
+				});
+			}
+
+			await updateWebServerSettings({
+				buildsConcurrency: input.buildsConcurrency,
+			});
+
+			await audit(ctx, {
+				action: "update",
+				resourceType: "settings",
+				resourceName: "builds-concurrency",
+			});
+			return true;
+		}),
+
+	updateEnforceSSO: enterpriseProcedure
+		.input(z.object({ enforceSSO: z.boolean() }))
+		.mutation(async ({ input, ctx }) => {
+			if (IS_CLOUD) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message: "This feature is only available for self-hosted instances",
+				});
+			}
+
+			await updateWebServerSettings({
+				enforceSSO: input.enforceSSO,
+			});
+
+			await audit(ctx, {
+				action: "update",
+				resourceType: "settings",
+				resourceName: "enforce-sso",
+			});
 			return true;
 		}),
 
@@ -299,11 +486,16 @@ export const settingsRouter = createTRPCRouter({
 
 	updateTraefikConfig: adminProcedure
 		.input(apiTraefikConfig)
-		.mutation(async ({ input }) => {
+		.mutation(async ({ input, ctx }) => {
 			if (IS_CLOUD) {
 				return true;
 			}
 			writeMainConfig(input.traefikConfig);
+			await audit(ctx, {
+				action: "update",
+				resourceType: "settings",
+				resourceName: "traefik-config",
+			});
 			return true;
 		}),
 
@@ -316,11 +508,16 @@ export const settingsRouter = createTRPCRouter({
 	}),
 	updateWebServerTraefikConfig: adminProcedure
 		.input(apiTraefikConfig)
-		.mutation(async ({ input }) => {
+		.mutation(async ({ input, ctx }) => {
 			if (IS_CLOUD) {
 				return true;
 			}
 			writeConfig("dokploy", input.traefikConfig);
+			await audit(ctx, {
+				action: "update",
+				resourceType: "settings",
+				resourceName: "web-server-traefik-config",
+			});
 			return true;
 		}),
 
@@ -334,49 +531,61 @@ export const settingsRouter = createTRPCRouter({
 
 	updateMiddlewareTraefikConfig: adminProcedure
 		.input(apiTraefikConfig)
-		.mutation(async ({ input }) => {
+		.mutation(async ({ input, ctx }) => {
 			if (IS_CLOUD) {
 				return true;
 			}
 			writeConfig("middlewares", input.traefikConfig);
+			await audit(ctx, {
+				action: "update",
+				resourceType: "settings",
+				resourceName: "middleware-traefik-config",
+			});
 			return true;
 		}),
+	getUpdateData: protectedProcedure.mutation(async () => {
+		if (IS_CLOUD) {
+			return DEFAULT_UPDATE_DATA;
+		}
 
-	checkAndUpdateImage: adminProcedure.mutation(async () => {
-		if (IS_CLOUD) {
-			return true;
-		}
-		return await pullLatestRelease();
+		return await getUpdateData(packageInfo.version);
 	}),
-	updateServer: adminProcedure.mutation(async () => {
+	updateServer: adminProcedure.mutation(async ({ ctx }) => {
 		if (IS_CLOUD) {
 			return true;
 		}
-		await spawnAsync("docker", [
-			"service",
-			"update",
-			"--force",
-			"--image",
-			getDokployImage(),
-			"dokploy",
-		]);
+
+		const data = await getUpdateData(packageInfo.version);
+		if (data.updateAvailable) {
+			void spawnAsync("docker", [
+				"service",
+				"update",
+				"--force",
+				"--image",
+				`dokploy/dokploy:${data.latestVersion}`,
+				"dokploy",
+			]);
+			await audit(ctx, {
+				action: "update",
+				resourceType: "settings",
+				resourceName: "dokploy-version",
+			});
+		}
+
 		return true;
 	}),
 
-	getDokployVersion: adminProcedure.query(() => {
+	getDokployVersion: protectedProcedure.query(() => {
 		return packageInfo.version;
+	}),
+	getReleaseTag: protectedProcedure.query(() => {
+		return getDokployImageTag();
 	}),
 	readDirectories: protectedProcedure
 		.input(apiServerSchema)
 		.query(async ({ ctx, input }) => {
 			try {
-				if (ctx.user.rol === "user") {
-					const canAccess = await canAccessToTraefikFiles(ctx.user.authId);
-
-					if (!canAccess) {
-						throw new TRPCError({ code: "UNAUTHORIZED" });
-					}
-				}
+				await checkPermission(ctx, { traefikFiles: ["read"] });
 				const { MAIN_TRAEFIK_PATH } = paths(!!input?.serverId);
 				const result = await readDirectory(MAIN_TRAEFIK_PATH, input?.serverId);
 				return result || [];
@@ -388,40 +597,62 @@ export const settingsRouter = createTRPCRouter({
 	updateTraefikFile: protectedProcedure
 		.input(apiModifyTraefikConfig)
 		.mutation(async ({ input, ctx }) => {
-			if (ctx.user.rol === "user") {
-				const canAccess = await canAccessToTraefikFiles(ctx.user.authId);
-
-				if (!canAccess) {
-					throw new TRPCError({ code: "UNAUTHORIZED" });
-				}
-			}
+			await checkPermission(ctx, { traefikFiles: ["write"] });
 			await writeTraefikConfigInPath(
 				input.path,
 				input.traefikConfig,
 				input?.serverId,
 			);
+			await audit(ctx, {
+				action: "update",
+				resourceType: "settings",
+				resourceName: "traefik-file",
+			});
 			return true;
 		}),
 
 	readTraefikFile: protectedProcedure
 		.input(apiReadTraefikConfig)
 		.query(async ({ input, ctx }) => {
-			if (ctx.user.rol === "user") {
-				const canAccess = await canAccessToTraefikFiles(ctx.user.authId);
+			await checkPermission(ctx, { traefikFiles: ["read"] });
 
-				if (!canAccess) {
+			if (input.serverId) {
+				const server = await findServerById(input.serverId);
+
+				if (server.organizationId !== ctx.session?.activeOrganizationId) {
 					throw new TRPCError({ code: "UNAUTHORIZED" });
 				}
 			}
+
 			return readConfigInPath(input.path, input.serverId);
 		}),
 	getIp: protectedProcedure.query(async () => {
 		if (IS_CLOUD) {
-			return true;
+			return "";
 		}
-		const admin = await findAdmin();
-		return admin.serverIp;
+		const settings = await getWebServerSettings();
+		return settings?.serverIp || "";
 	}),
+	updateServerIp: adminProcedure
+		.input(
+			z.object({
+				serverIp: z.string(),
+			}),
+		)
+		.mutation(async ({ input, ctx }) => {
+			if (IS_CLOUD) {
+				return true;
+			}
+			const settings = await updateWebServerSettings({
+				serverIp: input.serverIp,
+			});
+			await audit(ctx, {
+				action: "update",
+				resourceType: "settings",
+				resourceName: "server-ip",
+			});
+			return settings;
+		}),
 
 	getOpenApiDocument: protectedProcedure.query(
 		async ({ ctx }): Promise<unknown> => {
@@ -429,7 +660,7 @@ export const settingsRouter = createTRPCRouter({
 			const url = `${protocol}://${ctx.req.headers.host}/api`;
 			const openApiDocument = generateOpenApiDocument(appRouter, {
 				title: "tRPC OpenAPI",
-				version: "1.0.0",
+				version: packageInfo.version,
 				baseUrl: url,
 				docsUrl: `${url}/settings.getOpenApiDocument`,
 				tags: [
@@ -455,79 +686,97 @@ export const settingsRouter = createTRPCRouter({
 					"postgres",
 					"redis",
 					"mongo",
+					"libsql",
 					"mariadb",
 					"sshRouter",
 					"gitProvider",
 					"bitbucket",
+					"ai",
 					"github",
 					"gitlab",
+					"gitea",
+					"tag",
+					"patch",
+					"server",
+					"volumeBackups",
+					"environment",
+					"auditLog",
+					"customRole",
+					"whitelabeling",
+					"sso",
+					"licenseKey",
+					"organization",
+					"previewDeployment",
 				],
 			});
 
 			openApiDocument.info = {
 				title: "Dokploy API",
 				description: "Endpoints for dokploy",
-				// TODO: get version from package.json
-				version: "1.0.0",
+				version: packageInfo.version,
 			};
 
+			// Add security schemes configuration
+			openApiDocument.components = {
+				...openApiDocument.components,
+				securitySchemes: {
+					apiKey: {
+						type: "apiKey",
+						in: "header",
+						name: "x-api-key",
+						description: "API key authentication",
+					},
+				},
+			};
+
+			// Apply security globally to all endpoints
+			openApiDocument.security = [
+				{
+					apiKey: [],
+				},
+			];
 			return openApiDocument;
 		},
 	),
 	readTraefikEnv: adminProcedure
 		.input(apiServerSchema)
 		.query(async ({ input }) => {
-			const command =
-				"docker service inspect --format='{{range .Spec.TaskTemplate.ContainerSpec.Env}}{{println .}}{{end}}' dokploy-traefik";
-
-			if (input?.serverId) {
-				const result = await execAsyncRemote(input.serverId, command);
-				return result.stdout.trim();
-			}
-			if (!IS_CLOUD) {
-				const result = await execAsync(command);
-				return result.stdout.trim();
-			}
+			const envVars = await readEnvironmentVariables(
+				"dokploy-traefik",
+				input?.serverId,
+			);
+			return envVars;
 		}),
 
 	writeTraefikEnv: adminProcedure
 		.input(z.object({ env: z.string(), serverId: z.string().optional() }))
-		.mutation(async ({ input }) => {
+		.mutation(async ({ input, ctx }) => {
 			const envs = prepareEnvironmentVariables(input.env);
-			await initializeTraefik({
-				env: envs,
-				serverId: input.serverId,
-			});
+			const ports = await readPorts("dokploy-traefik", input?.serverId);
 
+			// Run in background so the request returns immediately; client polls /api/health.
+			void writeTraefikSetup({
+				env: envs,
+				additionalPorts: ports,
+				serverId: input.serverId,
+			}).catch((err) => {
+				console.error("writeTraefikEnv background writeTraefikSetup:", err);
+			});
+			await audit(ctx, {
+				action: "update",
+				resourceType: "settings",
+				resourceName: "traefik-env",
+			});
 			return true;
 		}),
 	haveTraefikDashboardPortEnabled: adminProcedure
 		.input(apiServerSchema)
 		.query(async ({ input }) => {
-			const command = `docker service inspect --format='{{json .Endpoint.Ports}}' dokploy-traefik`;
-
-			let stdout = "";
-			if (input?.serverId) {
-				const result = await execAsyncRemote(input.serverId, command);
-				stdout = result.stdout;
-			} else if (!IS_CLOUD) {
-				const result = await execAsync(
-					"docker service inspect --format='{{json .Endpoint.Ports}}' dokploy-traefik",
-				);
-				stdout = result.stdout;
-			}
-
-			const parsed: any[] = JSON.parse(stdout.trim());
-			for (const port of parsed) {
-				if (port.PublishedPort === 8080) {
-					return true;
-				}
-			}
-
-			return false;
+			const ports = await readPorts("dokploy-traefik", input?.serverId);
+			return ports.some((port) => port.targetPort === 8080);
 		}),
 
-	readStatsLogs: adminProcedure
+	readStatsLogs: protectedProcedure
 		.meta({
 			openapi: {
 				path: "/read-stats-logs",
@@ -537,64 +786,67 @@ export const settingsRouter = createTRPCRouter({
 			},
 		})
 		.input(apiReadStatsLogs)
-		.query(({ input }) => {
+		.query(async ({ input }) => {
 			if (IS_CLOUD) {
 				return {
 					data: [],
 					totalCount: 0,
 				};
 			}
-			const rawConfig = readMonitoringConfig();
+			const rawConfig = await readMonitoringConfig(
+				!!input.dateRange?.start && !!input.dateRange?.end,
+			);
+
 			const parsedConfig = parseRawConfig(
 				rawConfig as string,
 				input.page,
 				input.sort,
 				input.search,
 				input.status,
+				input.dateRange,
 			);
 
 			return parsedConfig;
 		}),
-	readStats: adminProcedure.query(() => {
-		if (IS_CLOUD) {
-			return [];
-		}
-		const rawConfig = readMonitoringConfig();
-		const processedLogs = processLogs(rawConfig as string);
-		return processedLogs || [];
-	}),
-	getLogRotateStatus: adminProcedure.query(async () => {
-		if (IS_CLOUD) {
-			return true;
-		}
-		return await logRotationManager.getStatus();
-	}),
-	toggleLogRotate: adminProcedure
+	readStats: adminProcedure
+		.meta({
+			openapi: {
+				path: "/read-stats",
+				method: "POST",
+				override: true,
+				enabled: false,
+			},
+		})
 		.input(
-			z.object({
-				enable: z.boolean(),
-			}),
+			z
+				.object({
+					dateRange: z
+						.object({
+							start: z.string().optional(),
+							end: z.string().optional(),
+						})
+						.optional(),
+				})
+				.optional(),
 		)
-		.mutation(async ({ input }) => {
+		.query(async ({ input }) => {
 			if (IS_CLOUD) {
-				return true;
+				return [];
 			}
-			if (input.enable) {
-				await logRotationManager.activate();
-			} else {
-				await logRotationManager.deactivate();
-			}
-
-			return true;
+			const rawConfig = await readMonitoringConfig(
+				!!input?.dateRange?.start || !!input?.dateRange?.end,
+			);
+			const processedLogs = processLogs(rawConfig as string, input?.dateRange);
+			return processedLogs || [];
 		}),
-	haveActivateRequests: adminProcedure.query(async () => {
+	haveActivateRequests: protectedProcedure.query(async () => {
 		if (IS_CLOUD) {
 			return true;
 		}
 		const config = readMainConfig();
 
 		if (!config) return false;
-		const parsedConfig = load(config) as {
+		const parsedConfig = parse(config) as {
 			accessLog?: {
 				filePath: string;
 			};
@@ -602,20 +854,20 @@ export const settingsRouter = createTRPCRouter({
 
 		return !!parsedConfig?.accessLog?.filePath;
 	}),
-	toggleRequests: adminProcedure
+	toggleRequests: protectedProcedure
 		.input(
 			z.object({
 				enable: z.boolean(),
 			}),
 		)
-		.mutation(async ({ input }) => {
+		.mutation(async ({ input, ctx }) => {
 			if (IS_CLOUD) {
 				return true;
 			}
 			const mainConfig = readMainConfig();
 			if (!mainConfig) return false;
 
-			const currentConfig = load(mainConfig) as {
+			const currentConfig = parse(mainConfig) as {
 				accessLog?: {
 					filePath: string;
 				};
@@ -627,10 +879,6 @@ export const settingsRouter = createTRPCRouter({
 						filePath: "/etc/dokploy/traefik/dynamic/access.log",
 						format: "json",
 						bufferingSize: 100,
-						filters: {
-							retryAttempts: true,
-							minDuration: "10ms",
-						},
 					},
 				};
 				currentConfig.accessLog = config.accessLog;
@@ -638,29 +886,218 @@ export const settingsRouter = createTRPCRouter({
 				currentConfig.accessLog = undefined;
 			}
 
-			writeMainConfig(dump(currentConfig));
-
+			writeMainConfig(stringify(currentConfig));
+			await audit(ctx, {
+				action: "update",
+				resourceType: "settings",
+				resourceName: "toggle-requests",
+			});
 			return true;
 		}),
-	isCloud: protectedProcedure.query(async () => {
+	isCloud: publicProcedure.query(async () => {
 		return IS_CLOUD;
 	}),
+	isUserSubscribed: protectedProcedure.query(async ({ ctx }) => {
+		const haveServers = await db.query.server.findMany({
+			where: eq(server.organizationId, ctx.session?.activeOrganizationId || ""),
+		});
+		const haveProjects = await db.query.projects.findMany({
+			where: eq(
+				projects.organizationId,
+				ctx.session?.activeOrganizationId || "",
+			),
+		});
+		return haveServers.length > 0 || haveProjects.length > 0;
+	}),
 	health: publicProcedure.query(async () => {
+		try {
+			await db.execute(sql`SELECT 1`);
+			return { status: "ok" };
+		} catch (error) {
+			console.error("Database connection error:", error);
+			throw error;
+		}
+	}),
+	checkInfrastructureHealth: adminProcedure.query(async () => {
 		if (IS_CLOUD) {
+			return {
+				postgres: { status: "healthy" as const },
+				traefik: { status: "healthy" as const },
+			};
+		}
+
+		const [postgres, traefik] = await Promise.all([
+			checkPostgresHealth(),
+			checkTraefikHealth(),
+		]);
+
+		return { postgres, traefik };
+	}),
+	setupGPU: adminProcedure
+		.input(
+			z.object({
+				serverId: z.string().optional(),
+			}),
+		)
+		.mutation(async ({ input, ctx }) => {
+			if (IS_CLOUD && !input.serverId) {
+				throw new Error("Select a server to enable the GPU Setup");
+			}
+
 			try {
-				await db.execute(sql`SELECT 1`);
-				return { status: "ok" };
+				await setupGPUSupport(input.serverId);
+				await audit(ctx, {
+					action: "update",
+					resourceType: "settings",
+					resourceName: "setup-gpu",
+				});
+				return { success: true };
 			} catch (error) {
-				console.error("Database connection error:", error);
+				console.error("GPU Setup Error:", error);
 				throw error;
 			}
+		}),
+	checkGPUStatus: adminProcedure
+		.input(
+			z.object({
+				serverId: z.string().optional(),
+			}),
+		)
+		.query(async ({ input }) => {
+			if (IS_CLOUD && !input.serverId) {
+				return {
+					driverInstalled: false,
+					driverVersion: undefined,
+					gpuModel: undefined,
+					runtimeInstalled: false,
+					runtimeConfigured: false,
+					cudaSupport: undefined,
+					cudaVersion: undefined,
+					memoryInfo: undefined,
+					availableGPUs: 0,
+					swarmEnabled: false,
+					gpuResources: 0,
+				};
+			}
+
+			try {
+				return await checkGPUStatus(input.serverId || "");
+			} catch (error) {
+				const message =
+					error instanceof Error ? error.message : "Failed to check GPU status";
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message,
+				});
+			}
+		}),
+	updateTraefikPorts: adminProcedure
+		.input(
+			z.object({
+				serverId: z.string().optional(),
+				additionalPorts: z.array(
+					z.object({
+						targetPort: z.number(),
+						publishedPort: z.number(),
+						protocol: z.enum(["tcp", "udp", "sctp"]),
+					}),
+				),
+			}),
+		)
+		.mutation(async ({ input, ctx }) => {
+			try {
+				if (IS_CLOUD && !input.serverId) {
+					throw new TRPCError({
+						code: "UNAUTHORIZED",
+						message: "Please set a serverId to update Traefik ports",
+					});
+				}
+				const env = await readEnvironmentVariables(
+					"dokploy-traefik",
+					input?.serverId,
+				);
+
+				for (const port of input.additionalPorts) {
+					const portCheck = await checkPortInUse(
+						port.publishedPort,
+						input.serverId,
+					);
+					if (portCheck.isInUse) {
+						throw new TRPCError({
+							code: "CONFLICT",
+							message: `Port ${port.targetPort} is already in use by ${portCheck.conflictingContainer}`,
+						});
+					}
+				}
+				const preparedEnv = prepareEnvironmentVariables(env);
+
+				// Run in background so the request returns immediately; client polls /api/health.
+				void writeTraefikSetup({
+					env: preparedEnv,
+					additionalPorts: input.additionalPorts,
+					serverId: input.serverId,
+				}).catch((err) => {
+					console.error(
+						"updateTraefikPorts background writeTraefikSetup:",
+						err,
+					);
+				});
+				await audit(ctx, {
+					action: "update",
+					resourceType: "settings",
+					resourceName: "traefik-ports",
+				});
+				return true;
+			} catch (error) {
+				throw new TRPCError({
+					code: "BAD_REQUEST",
+					message:
+						error instanceof Error
+							? error.message
+							: "Error updating Traefik ports",
+					cause: error,
+				});
+			}
+		}),
+	getTraefikPorts: adminProcedure
+		.input(apiServerSchema)
+		.query(async ({ input }) => {
+			const ports = await readPorts("dokploy-traefik", input?.serverId);
+			return ports;
+		}),
+	updateLogCleanup: protectedProcedure
+		.input(
+			z.object({
+				cronExpression: z.string().nullable(),
+			}),
+		)
+		.mutation(async ({ input, ctx }) => {
+			if (IS_CLOUD) {
+				return true;
+			}
+			let result: boolean;
+			if (input.cronExpression) {
+				result = await startLogCleanup(input.cronExpression);
+			} else {
+				result = await stopLogCleanup();
+			}
+			await audit(ctx, {
+				action: "update",
+				resourceType: "settings",
+				resourceName: "log-cleanup",
+			});
+			return result;
+		}),
+
+	getLogCleanupStatus: protectedProcedure.query(async () => {
+		return getLogCleanupStatus();
+	}),
+
+	getDokployCloudIps: adminProcedure.query(async () => {
+		if (!IS_CLOUD) {
+			return [];
 		}
-		return { status: "not_cloud" };
+		const ips = process.env.DOKPLOY_CLOUD_IPS?.split(",");
+		return ips;
 	}),
 });
-// {
-// 	"Parallelism": 1,
-// 	"Delay": 10000000000,
-// 	"FailureAction": "rollback",
-// 	"Order": "start-first"
-//   }

@@ -1,11 +1,10 @@
-import { relations, sql } from "drizzle-orm";
-import { boolean, pgEnum, pgTable, text, timestamp } from "drizzle-orm/pg-core";
+import { relations } from "drizzle-orm";
+import { pgEnum, pgTable, text } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { nanoid } from "nanoid";
 import { z } from "zod";
-import { admins } from "./admin";
+import { organization } from "./account";
 import { applications } from "./application";
-import { auth } from "./auth";
 /**
  * This is an example of how to use the multi-project schema feature of Drizzle ORM. Use the same
  * database instance for multiple projects.
@@ -28,27 +27,48 @@ export const registry = pgTable("registry", {
 		.notNull()
 		.$defaultFn(() => new Date().toISOString()),
 	registryType: registryType("selfHosted").notNull().default("cloud"),
-	adminId: text("adminId")
+	organizationId: text("organizationId")
 		.notNull()
-		.references(() => admins.adminId, { onDelete: "cascade" }),
+		.references(() => organization.id, { onDelete: "cascade" }),
 });
 
-export const registryRelations = relations(registry, ({ one, many }) => ({
-	admin: one(admins, {
-		fields: [registry.adminId],
-		references: [admins.adminId],
+export const registryRelations = relations(registry, ({ many }) => ({
+	applications: many(applications, {
+		relationName: "applicationRegistry",
 	}),
-	applications: many(applications),
+	buildApplications: many(applications, {
+		relationName: "applicationBuildRegistry",
+	}),
+	rollbackApplications: many(applications, {
+		relationName: "applicationRollbackRegistry",
+	}),
 }));
+
+// Registry usernames should NOT be lowercased.
+// Some registries (e.g. AWS ECR) require a specific case: the username must be
+// exactly "AWS" (uppercase) for ECR authentication. Docker Hub usernames are
+// case-insensitive for login, so preserving case is safe for all providers.
+const registryUsernameSchema = z.string().trim().min(1);
+
+// Registry URLs must be hostname[:port] only — no shell metacharacters
+// Empty string is allowed (means default/Docker Hub registry)
+const registryUrlSchema = z
+	.string()
+	.refine(
+		(val) =>
+			val === "" ||
+			/^[a-zA-Z0-9]([a-zA-Z0-9._-]*[a-zA-Z0-9])?(:\d{1,5})?$/.test(val),
+		"Registry URL must be a valid hostname or hostname:port (e.g. registry.example.com or localhost:5000)",
+	);
 
 const createSchema = createInsertSchema(registry, {
 	registryName: z.string().min(1),
-	username: z.string().min(1),
+	username: registryUsernameSchema,
 	password: z.string().min(1),
-	registryUrl: z.string(),
-	adminId: z.string().min(1),
+	registryUrl: registryUrlSchema,
+	organizationId: z.string().min(1),
 	registryId: z.string().min(1),
-	registryType: z.enum(["selfHosted", "cloud"]),
+	registryType: z.enum(["cloud"]),
 	imagePrefix: z.string().nullable().optional(),
 });
 
@@ -56,10 +76,10 @@ export const apiCreateRegistry = createSchema
 	.pick({})
 	.extend({
 		registryName: z.string().min(1),
-		username: z.string().min(1),
+		username: registryUsernameSchema,
 		password: z.string().min(1),
-		registryUrl: z.string(),
-		registryType: z.enum(["selfHosted", "cloud"]),
+		registryUrl: registryUrlSchema,
+		registryType: z.enum(["cloud"]),
 		imagePrefix: z.string().nullable().optional(),
 	})
 	.required()
@@ -68,14 +88,22 @@ export const apiCreateRegistry = createSchema
 	});
 
 export const apiTestRegistry = createSchema.pick({}).extend({
-	registryName: z.string().min(1),
-	username: z.string().min(1),
+	registryName: z.string().optional(),
+	username: registryUsernameSchema,
 	password: z.string().min(1),
-	registryUrl: z.string(),
-	registryType: z.enum(["selfHosted", "cloud"]),
+	registryUrl: registryUrlSchema,
+	registryType: z.enum(["cloud"]),
 	imagePrefix: z.string().nullable().optional(),
 	serverId: z.string().optional(),
 });
+
+export const apiTestRegistryById = createSchema
+	.pick({
+		registryId: true,
+	})
+	.extend({
+		serverId: z.string().optional(),
+	});
 
 export const apiRemoveRegistry = createSchema
 	.pick({
@@ -83,11 +111,9 @@ export const apiRemoveRegistry = createSchema
 	})
 	.required();
 
-export const apiFindOneRegistry = createSchema
-	.pick({
-		registryId: true,
-	})
-	.required();
+export const apiFindOneRegistry = z.object({
+	registryId: z.string().min(1),
+});
 
 export const apiUpdateRegistry = createSchema.partial().extend({
 	registryId: z.string().min(1),

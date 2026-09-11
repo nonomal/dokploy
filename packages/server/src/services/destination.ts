@@ -5,18 +5,19 @@ import {
 } from "@dokploy/server/db/schema";
 import { TRPCError } from "@trpc/server";
 import { and, eq } from "drizzle-orm";
+import type { z } from "zod";
 
 export type Destination = typeof destinations.$inferSelect;
 
-export const createDestintation = async (
-	input: typeof apiCreateDestination._type,
-	adminId: string,
+export const createDestination = async (
+	input: z.infer<typeof apiCreateDestination>,
+	organizationId: string,
 ) => {
 	const newDestination = await db
 		.insert(destinations)
 		.values({
 			...input,
-			adminId: adminId,
+			organizationId: organizationId,
 		})
 		.returning()
 		.then((value) => value[0]);
@@ -46,14 +47,14 @@ export const findDestinationById = async (destinationId: string) => {
 
 export const removeDestinationById = async (
 	destinationId: string,
-	adminId: string,
+	organizationId: string,
 ) => {
 	const result = await db
 		.delete(destinations)
 		.where(
 			and(
 				eq(destinations.destinationId, destinationId),
-				eq(destinations.adminId, adminId),
+				eq(destinations.organizationId, organizationId),
 			),
 		)
 		.returning();
@@ -73,7 +74,7 @@ export const updateDestinationById = async (
 		.where(
 			and(
 				eq(destinations.destinationId, destinationId),
-				eq(destinations.adminId, destinationData.adminId || ""),
+				eq(destinations.organizationId, destinationData.organizationId || ""),
 			),
 		)
 		.returning();

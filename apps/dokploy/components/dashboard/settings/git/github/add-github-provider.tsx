@@ -1,3 +1,5 @@
+import { format } from "date-fns";
+import { useEffect, useState } from "react";
 import { GithubIcon } from "@/components/icons/data-tools-icons";
 import { Button } from "@/components/ui/button";
 import { CardContent } from "@/components/ui/card";
@@ -11,22 +13,29 @@ import {
 import { Input } from "@/components/ui/input";
 import { Switch } from "@/components/ui/switch";
 import { api } from "@/utils/api";
-import { format } from "date-fns";
-import { useEffect, useState } from "react";
+import { DEFAULT_GITHUB_URL, resolveGithubBaseUrl } from "@/utils/github-utils";
 
 export const AddGithubProvider = () => {
 	const [isOpen, setIsOpen] = useState(false);
-	const { data } = api.auth.get.useQuery();
+	const { data: activeOrganization } = api.organization.active.useQuery();
+
+	const { data: session } = api.user.session.useQuery();
+	const { data } = api.user.get.useQuery();
 	const [manifest, setManifest] = useState("");
 	const [isOrganization, setIsOrganization] = useState(false);
 	const [organizationName, setOrganization] = useState("");
+	const [githubUrl, setGithubUrl] = useState(DEFAULT_GITHUB_URL);
+
+	const { baseUrl, error: githubUrlError } = resolveGithubBaseUrl(githubUrl);
+
+	const randomString = () => Math.random().toString(36).slice(2, 8);
 
 	useEffect(() => {
 		const url = document.location.origin;
 		const manifest = JSON.stringify(
 			{
-				redirect_url: `${origin}/api/providers/github/setup?authId=${data?.id}`,
-				name: `Dokploy-${format(new Date(), "yyyy-MM-dd")}`,
+				redirect_url: `${origin}/api/providers/github/setup?organizationId=${activeOrganization?.id ?? ""}&userId=${session?.user?.id ?? ""}&githubUrl=${encodeURIComponent(baseUrl)}`,
+				name: `Dokploy-${format(new Date(), "yyyy-MM-dd")}-${randomString()}`,
 				url: origin,
 				hook_attributes: {
 					url: `${url}/api/deploy/github`,
@@ -47,13 +56,13 @@ export const AddGithubProvider = () => {
 		);
 
 		setManifest(manifest);
-	}, [data?.id]);
+	}, [activeOrganization?.id, session?.user?.id, baseUrl]);
 
 	return (
 		<Dialog open={isOpen} onOpenChange={setIsOpen}>
 			<DialogTrigger asChild>
 				<Button variant="secondary" className="flex items-center space-x-1">
-					<GithubIcon />
+					<GithubIcon className="text-current fill-current" />
 					<span>Github</span>
 				</Button>
 			</DialogTrigger>
@@ -74,6 +83,25 @@ export const AddGithubProvider = () => {
 								below to get started.
 							</p>
 							<div className="mt-4 flex flex-col gap-4">
+								<div className="flex flex-col gap-2">
+									<span className="text-sm">GitHub URL</span>
+									<Input
+										placeholder={DEFAULT_GITHUB_URL}
+										value={githubUrl}
+										onChange={(e) => setGithubUrl(e.target.value)}
+									/>
+									<span className="text-muted-foreground text-xs">
+										Leave as is for github.com. For GitHub Enterprise, use your
+										instance URL (e.g. https://acme.ghe.com or
+										https://github.acme.com).
+									</span>
+									{githubUrlError && (
+										<span className="text-destructive text-xs">
+											{githubUrlError}
+										</span>
+									)}
+								</div>
+
 								<div className="flex flex-row gap-4">
 									<span>Organization?</span>
 									<Switch
@@ -93,8 +121,8 @@ export const AddGithubProvider = () => {
 							<form
 								action={
 									isOrganization
-										? `https://github.com/organizations/${organizationName}/settings/apps/new?state=gh_init:${data?.id}`
-										: `https://github.com/settings/apps/new?state=gh_init:${data?.id}`
+										? `${baseUrl}/organizations/${organizationName}/settings/apps/new?state=gh_init:${activeOrganization?.id}:${session?.user?.id ?? ""}`
+										: `${baseUrl}/settings/apps/new?state=gh_init:${activeOrganization?.id}:${session?.user?.id ?? ""}`
 								}
 								method="post"
 							>
@@ -107,9 +135,29 @@ export const AddGithubProvider = () => {
 								/>
 								<br />
 
-								<div className="flex w-full justify-end">
+								<div className="flex w-full items-center justify-between">
+									<a
+										href={
+											isOrganization && organizationName
+												? `${baseUrl}/organizations/${organizationName}/settings/installations`
+												: `${baseUrl}/settings/installations`
+										}
+										className={`text-muted-foreground text-sm hover:underline duration-300
+											 ${
+													isOrganization && !organizationName
+														? "pointer-events-none opacity-50"
+														: ""
+}`}
+										target="_blank"
+										rel="noopener noreferrer"
+									>
+										Unsure if you already have an app?
+									</a>
 									<Button
-										disabled={isOrganization && organizationName.length < 1}
+										disabled={
+											!!githubUrlError ||
+											(isOrganization && organizationName.length < 1)
+										}
 										type="submit"
 										className="self-end"
 									>

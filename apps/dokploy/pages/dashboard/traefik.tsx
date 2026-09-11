@@ -1,37 +1,34 @@
-import { ShowTraefikSystem } from "@/components/dashboard/file-system/show-traefik-system";
-import { DashboardLayout } from "@/components/layouts/dashboard-layout";
-import { appRouter } from "@/server/api/root";
-import { IS_CLOUD, validateRequest } from "@dokploy/server";
+import { validateRequest } from "@dokploy/server/lib/auth";
 import { createServerSideHelpers } from "@trpc/react-query/server";
 import type { GetServerSidePropsContext } from "next";
-import React, { type ReactElement } from "react";
+import type { ReactElement } from "react";
 import superjson from "superjson";
+import { ShowTraefikSystem } from "@/components/dashboard/file-system/show-traefik-system";
+import { DashboardLayout } from "@/components/layouts/dashboard-layout";
+import { ServerFilter } from "@/components/shared/server-filter";
+import { appRouter } from "@/server/api/root";
 
 const Dashboard = () => {
-	return <ShowTraefikSystem />;
+	return (
+		<ServerFilter>
+			{(serverId) => <ShowTraefikSystem serverId={serverId} />}
+		</ServerFilter>
+	);
 };
 
 export default Dashboard;
 
 Dashboard.getLayout = (page: ReactElement) => {
-	return <DashboardLayout tab={"traefik"}>{page}</DashboardLayout>;
+	return <DashboardLayout>{page}</DashboardLayout>;
 };
 export async function getServerSideProps(
 	ctx: GetServerSidePropsContext<{ serviceId: string }>,
 ) {
-	if (IS_CLOUD) {
-		return {
-			redirect: {
-				permanent: true,
-				destination: "/dashboard/projects",
-			},
-		};
-	}
-	const { user, session } = await validateRequest(ctx.req, ctx.res);
+	const { user, session } = await validateRequest(ctx.req);
 	if (!user) {
 		return {
 			redirect: {
-				permanent: true,
+				permanent: false,
 				destination: "/",
 			},
 		};
@@ -44,35 +41,30 @@ export async function getServerSideProps(
 			req: req as any,
 			res: res as any,
 			db: null as any,
-			session: session,
-			user: user,
+			session: session as any,
+			user: user as any,
 		},
 		transformer: superjson,
 	});
 	try {
 		await helpers.project.all.prefetch();
-		const auth = await helpers.auth.get.fetch();
 
-		if (auth.rol === "user") {
-			const user = await helpers.user.byAuthId.fetch({
-				authId: auth.id,
-			});
+		const userPermissions = await helpers.user.getPermissions.fetch();
 
-			if (!user.canAccessToTraefikFiles) {
-				return {
-					redirect: {
-						permanent: true,
-						destination: "/",
-					},
-				};
-			}
+		if (!userPermissions?.traefikFiles.read) {
+			return {
+				redirect: {
+					permanent: false,
+					destination: "/",
+				},
+			};
 		}
 		return {
 			props: {
 				trpcState: helpers.dehydrate(),
 			},
 		};
-	} catch (error) {
+	} catch {
 		return {
 			props: {},
 		};

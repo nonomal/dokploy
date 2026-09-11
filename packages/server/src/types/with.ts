@@ -5,6 +5,7 @@ import type {
 	ExtractTablesWithRelations,
 } from "drizzle-orm";
 import { z } from "zod";
+
 /*
  * This is for testing purposes in the case we need a nested relational types
  *
@@ -36,7 +37,7 @@ type AnyObj = Record<PropertyKey, unknown>;
 type ZodObj<T extends AnyObj> = {
 	[key in keyof T]: z.ZodType<T[key]>;
 };
-const zObject = <T extends AnyObj>(arg: ZodObj<T>) => z.object(arg);
+const _zObject = <T extends AnyObj>(arg: ZodObj<T>) => z.object(arg);
 
 // const goodDogScheme = zObject<UserWithPosts>({
 //   //   prueba: schema.selectDatabaseSchema,

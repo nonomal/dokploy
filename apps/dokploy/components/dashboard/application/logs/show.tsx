@@ -1,3 +1,8 @@
+import { Loader2 } from "lucide-react";
+import dynamic from "next/dynamic";
+import { useEffect, useState } from "react";
+import { resolveContainerSelection } from "@/components/dashboard/docker/logs/utils";
+import { Badge } from "@/components/ui/badge";
 import {
 	Card,
 	CardContent,
@@ -15,10 +20,8 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { api } from "@/utils/api";
-import { Loader2 } from "lucide-react";
-import dynamic from "next/dynamic";
-import { useEffect, useState } from "react";
 export const DockerLogs = dynamic(
 	() =>
 		import("@/components/dashboard/docker/logs/docker-logs-id").then(
@@ -29,28 +32,65 @@ export const DockerLogs = dynamic(
 	},
 );
 
+export const badgeStateColor = (state: string) => {
+	switch (state) {
+		case "running":
+		case "ready":
+			return "green";
+		case "exited":
+		case "shutdown":
+			return "red";
+		case "accepted":
+		case "created":
+			return "blue";
+		default:
+			return "default";
+	}
+};
+
 interface Props {
 	appName: string;
 	serverId?: string;
+	serviceId?: string;
 }
 
-export const ShowDockerLogs = ({ appName, serverId }: Props) => {
-	const { data, isLoading } = api.docker.getContainersByAppNameMatch.useQuery(
-		{
-			appName,
-			serverId,
-		},
-		{
-			enabled: !!appName,
-		},
-	);
+export const ShowDockerLogs = ({ appName, serverId, serviceId }: Props) => {
 	const [containerId, setContainerId] = useState<string | undefined>();
+	const [option, setOption] = useState<"swarm" | "native">("native");
+
+	const { data: services, isPending: servicesLoading } =
+		api.docker.getServiceContainersByAppName.useQuery(
+			{
+				appName,
+				serverId,
+			},
+			{
+				enabled: !!appName && option === "swarm",
+			},
+		);
+
+	const { data: containers, isPending: containersLoading } =
+		api.docker.getContainersByAppNameMatch.useQuery(
+			{
+				appName,
+				serverId,
+			},
+			{
+				enabled: !!appName && option === "native",
+			},
+		);
+
+	const availableContainers = option === "native" ? containers : services;
 
 	useEffect(() => {
-		if (data && data?.length > 0) {
-			setContainerId(data[0]?.containerId);
-		}
-	}, [data]);
+		setContainerId((currentContainerId) =>
+			resolveContainerSelection(currentContainerId, availableContainers),
+		);
+	}, [availableContainers]);
+
+	const isLoading = option === "native" ? containersLoading : servicesLoading;
+	const containersLength =
+		option === "native" ? containers?.length : services?.length;
 
 	return (
 		<Card className="bg-background">
@@ -62,7 +102,22 @@ export const ShowDockerLogs = ({ appName, serverId }: Props) => {
 			</CardHeader>
 
 			<CardContent className="flex flex-col gap-4">
-				<Label>Select a container to view logs</Label>
+				<div className="flex flex-col sm:flex-row justify-between sm:items-center gap-2">
+					<Label>Select a container to view logs</Label>
+					<div className="flex flex-row gap-2 items-center">
+						<span className="text-sm text-muted-foreground">
+							{option === "native" ? "Native" : "Swarm"}
+						</span>
+						<Switch
+							checked={option === "native"}
+							onCheckedChange={(checked) => {
+								setContainerId(undefined);
+								setOption(checked ? "native" : "swarm");
+							}}
+						/>
+					</div>
+				</div>
+
 				<Select onValueChange={setContainerId} value={containerId}>
 					<SelectTrigger>
 						{isLoading ? (
@@ -76,22 +131,57 @@ export const ShowDockerLogs = ({ appName, serverId }: Props) => {
 					</SelectTrigger>
 					<SelectContent>
 						<SelectGroup>
-							{data?.map((container) => (
-								<SelectItem
-									key={container.containerId}
-									value={container.containerId}
-								>
-									{container.name} ({container.containerId}) {container.state}
-								</SelectItem>
-							))}
-							<SelectLabel>Containers ({data?.length})</SelectLabel>
+							{option === "native" ? (
+								<div>
+									{containers?.map((container) => (
+										<SelectItem
+											key={container.containerId}
+											value={container.containerId}
+										>
+											{container.name} ({container.containerId}){" "}
+											<Badge variant={badgeStateColor(container.state)}>
+												{container.state}
+											</Badge>
+											{container.status ? ` ${container.status}` : ""}
+										</SelectItem>
+									))}
+								</div>
+							) : (
+								<>
+									{services?.map((container) => (
+										<SelectItem
+											key={container.containerId}
+											value={container.containerId}
+										>
+											{container.name} ({container.containerId}@{container.node}
+											)
+											<Badge variant={badgeStateColor(container.state)}>
+												{container.state}
+											</Badge>
+											{container.currentState
+												? ` ${container.currentState}`
+												: ""}
+										</SelectItem>
+									))}
+								</>
+							)}
+
+							<SelectLabel>Containers ({containersLength})</SelectLabel>
 						</SelectGroup>
 					</SelectContent>
 				</Select>
+				{option === "swarm" &&
+					services?.find((c) => c.containerId === containerId)?.error && (
+						<div className="rounded-md bg-destructive/10 border border-destructive/20 px-3 py-2 text-sm text-destructive">
+							<span className="font-medium">Error: </span>
+							{services?.find((c) => c.containerId === containerId)?.error}
+						</div>
+					)}
 				<DockerLogs
 					serverId={serverId || ""}
-					id="terminal"
 					containerId={containerId || "select-a-container"}
+					runType={option}
+					serviceId={serviceId}
 				/>
 			</CardContent>
 		</Card>

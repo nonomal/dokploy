@@ -1,3 +1,8 @@
+import { standardSchemaResolver as zodResolver } from "@hookform/resolvers/standard-schema";
+import { TrashIcon } from "lucide-react";
+import { useEffect } from "react";
+import { useForm } from "react-hook-form";
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
 import { Dropzone } from "@/components/ui/dropzone";
 import {
@@ -11,11 +16,6 @@ import {
 import { Input } from "@/components/ui/input";
 import { api } from "@/utils/api";
 import { type UploadFile, uploadFileSchema } from "@/utils/schema";
-import { zodResolver } from "@hookform/resolvers/zod";
-import { TrashIcon } from "lucide-react";
-import { useEffect } from "react";
-import { useForm } from "react-hook-form";
-import { toast } from "sonner";
 
 interface Props {
 	applicationId: string;
@@ -24,10 +24,10 @@ interface Props {
 export const SaveDragNDrop = ({ applicationId }: Props) => {
 	const { data, refetch } = api.application.one.useQuery({ applicationId });
 
-	const { mutateAsync, isLoading } =
+	const { mutateAsync, isPending } =
 		api.application.dropDeployment.useMutation();
 
-	const form = useForm<UploadFile>({
+	const form = useForm({
 		defaultValues: {},
 		resolver: zodResolver(uploadFileSchema),
 	});
@@ -56,7 +56,7 @@ export const SaveDragNDrop = ({ applicationId }: Props) => {
 				await refetch();
 			})
 			.catch(() => {
-				toast.error("Error to save the deployment");
+				toast.error("Error saving the deployment");
 			});
 	};
 
@@ -129,8 +129,8 @@ export const SaveDragNDrop = ({ applicationId }: Props) => {
 					<Button
 						type="submit"
 						className="w-fit"
-						isLoading={isLoading}
-						disabled={!zip || isLoading}
+						isLoading={isPending}
+						disabled={!zip || isPending}
 					>
 						Deploy{" "}
 					</Button>

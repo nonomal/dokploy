@@ -1,12 +1,11 @@
-import { ShowDestinations } from "@/components/dashboard/settings/ssh-keys/show-ssh-keys";
-import { DashboardLayout } from "@/components/layouts/dashboard-layout";
-import { SettingsLayout } from "@/components/layouts/settings-layout";
-import { appRouter } from "@/server/api/root";
 import { validateRequest } from "@dokploy/server";
 import { createServerSideHelpers } from "@trpc/react-query/server";
 import type { GetServerSidePropsContext } from "next";
-import React, { type ReactElement } from "react";
+import type { ReactElement } from "react";
 import superjson from "superjson";
+import { ShowDestinations } from "@/components/dashboard/settings/ssh-keys/show-ssh-keys";
+import { DashboardLayout } from "@/components/layouts/dashboard-layout";
+import { appRouter } from "@/server/api/root";
 
 const Page = () => {
 	return (
@@ -19,63 +18,53 @@ const Page = () => {
 export default Page;
 
 Page.getLayout = (page: ReactElement) => {
-	return (
-		<DashboardLayout tab={"settings"}>
-			<SettingsLayout>{page}</SettingsLayout>
-		</DashboardLayout>
-	);
+	return <DashboardLayout metaName="SSH Keys">{page}</DashboardLayout>;
 };
 export async function getServerSideProps(
 	ctx: GetServerSidePropsContext<{ serviceId: string }>,
 ) {
-	const { user, session } = await validateRequest(ctx.req, ctx.res);
+	const { user, session } = await validateRequest(ctx.req);
 	if (!user) {
 		return {
 			redirect: {
-				permanent: true,
+				permanent: false,
 				destination: "/",
 			},
 		};
 	}
-	const { req, res, resolvedUrl } = ctx;
+	const { req, res } = ctx;
 	const helpers = createServerSideHelpers({
 		router: appRouter,
 		ctx: {
 			req: req as any,
 			res: res as any,
 			db: null as any,
-			session: session,
-			user: user,
+			session: session as any,
+			user: user as any,
 		},
 		transformer: superjson,
 	});
 
 	try {
 		await helpers.project.all.prefetch();
-
-		const auth = await helpers.auth.get.fetch();
 		await helpers.settings.isCloud.prefetch();
 
-		if (auth.rol === "user") {
-			const user = await helpers.user.byAuthId.fetch({
-				authId: auth.id,
-			});
+		const userPermissions = await helpers.user.getPermissions.fetch();
 
-			if (!user.canAccessToSSHKeys) {
-				return {
-					redirect: {
-						permanent: true,
-						destination: "/",
-					},
-				};
-			}
+		if (!userPermissions?.sshKeys.read) {
+			return {
+				redirect: {
+					permanent: false,
+					destination: "/",
+				},
+			};
 		}
 		return {
 			props: {
 				trpcState: helpers.dehydrate(),
 			},
 		};
-	} catch (error) {
+	} catch {
 		return {
 			props: {},
 		};

@@ -2,21 +2,25 @@ import fs from "node:fs";
 import path from "node:path";
 import type { Readable } from "node:stream";
 import { docker, paths } from "@dokploy/server/constants";
+import type { Compose } from "@dokploy/server/services/compose";
 import type { ContainerInfo, ResourceRequirements } from "dockerode";
 import { parse } from "dotenv";
+import { quote } from "shell-quote";
 import type { ApplicationNested } from "../builders";
+import type { LibsqlNested } from "../databases/libsql";
 import type { MariadbNested } from "../databases/mariadb";
 import type { MongoNested } from "../databases/mongo";
 import type { MysqlNested } from "../databases/mysql";
 import type { PostgresNested } from "../databases/postgres";
 import type { RedisNested } from "../databases/redis";
 import { execAsync, execAsyncRemote } from "../process/execAsync";
+import { spawnAsync } from "../process/spawnAsync";
 import { getRemoteDocker } from "../servers/remote-docker";
 
 interface RegistryAuth {
 	username: string;
 	password: string;
-	serveraddress: string;
+	registryUrl: string;
 }
 
 export const pullImage = async (
@@ -29,29 +33,21 @@ export const pullImage = async (
 			throw new Error("Docker image not found");
 		}
 
-		await new Promise((resolve, reject) => {
-			docker.pull(dockerImage, { authconfig: authConfig }, (err, stream) => {
-				if (err) {
-					reject(err);
-					return;
-				}
-
-				docker.modem.followProgress(
-					stream as Readable,
-					(err: Error | null, res) => {
-						if (!err) {
-							resolve(res);
-						}
-						if (err) {
-							reject(err);
-						}
-					},
-					(event) => {
-						onData?.(event);
-					},
-				);
-			});
-		});
+		if (authConfig?.username && authConfig?.password) {
+			await spawnAsync(
+				"docker",
+				[
+					"login",
+					authConfig.registryUrl || "",
+					"-u",
+					authConfig.username,
+					"-p",
+					authConfig.password,
+				],
+				onData,
+			);
+		}
+		await spawnAsync("docker", ["pull", dockerImage], onData);
 	} catch (error) {
 		throw error;
 	}
@@ -107,7 +103,7 @@ export const containerExists = async (containerName: string) => {
 	try {
 		await container.inspect();
 		return true;
-	} catch (error) {
+	} catch {
 		return false;
 	}
 };
@@ -149,79 +145,279 @@ export const getContainerByName = (name: string): Promise<ContainerInfo> => {
 		});
 	});
 };
-export const cleanUpUnusedImages = async (serverId?: string) => {
+
+/**
+ * Docker commands sent using this method are held in a hold when Docker is busy.
+ *
+ * https://github.com/Dokploy/dokploy/pull/3064
+ */
+export const dockerSafeExec = (exec: string) => `
+CHECK_INTERVAL=10
+MAX_WAIT=300
+WAITED=0
+
+echo "Preparing for execution..."
+
+while true; do
+    PROCESSES=$(ps -eo args | awk '$1 ~ /(^|\\/)docker$/')
+
+    if [ -z "$PROCESSES" ]; then
+        echo "Docker is idle. Starting execution..."
+        break
+    fi
+
+    if [ "$WAITED" -ge "$MAX_WAIT" ]; then
+        echo "Docker still busy after \${MAX_WAIT}s, proceeding anyway." >&2
+        break
+    fi
+
+    echo "Docker is busy. Will check again in $CHECK_INTERVAL seconds..."
+    sleep $CHECK_INTERVAL
+    WAITED=$((WAITED + CHECK_INTERVAL))
+done
+
+${exec}
+
+echo "Execution completed."
+`;
+
+const cleanupCommands = {
+	containers: "docker container prune --force",
+	images: "docker image prune --all --force",
+	volumes: "docker volume prune --all --force",
+	builders: "docker builder prune --all --force",
+	system: "docker system prune --all --force",
+};
+
+export const cleanupContainers = async (serverId?: string) => {
 	try {
+		const command = cleanupCommands.containers;
+
 		if (serverId) {
-			await execAsyncRemote(serverId, "docker image prune --all --force");
+			await execAsyncRemote(serverId, dockerSafeExec(command));
 		} else {
-			await execAsync("docker image prune --all --force");
+			await execAsync(dockerSafeExec(command));
 		}
 	} catch (error) {
 		console.error(error);
+
 		throw error;
 	}
 };
 
-export const cleanStoppedContainers = async (serverId?: string) => {
+export const cleanupImages = async (serverId?: string) => {
 	try {
+		const command = cleanupCommands.images;
+
 		if (serverId) {
-			await execAsyncRemote(serverId, "docker container prune --force");
-		} else {
-			await execAsync("docker container prune --force");
-		}
+			await execAsyncRemote(serverId, dockerSafeExec(command));
+		} else await execAsync(dockerSafeExec(command));
 	} catch (error) {
 		console.error(error);
+
 		throw error;
 	}
 };
 
-export const cleanUpUnusedVolumes = async (serverId?: string) => {
+export const cleanupVolumes = async (serverId?: string) => {
 	try {
+		const command = cleanupCommands.volumes;
+
 		if (serverId) {
-			await execAsyncRemote(serverId, "docker volume prune --all --force");
+			await execAsyncRemote(serverId, dockerSafeExec(command));
 		} else {
-			await execAsync("docker volume prune --all --force");
+			await execAsync(dockerSafeExec(command));
 		}
 	} catch (error) {
 		console.error(error);
+
 		throw error;
 	}
 };
 
-export const cleanUpInactiveContainers = async () => {
+export const cleanupBuilders = async (serverId?: string) => {
 	try {
-		const containers = await docker.listContainers({ all: true });
-		const inactiveContainers = containers.filter(
-			(container) => container.State !== "running",
+		const command = cleanupCommands.builders;
+
+		if (serverId) {
+			await execAsyncRemote(serverId, dockerSafeExec(command));
+		} else {
+			await execAsync(dockerSafeExec(command));
+		}
+	} catch (error) {
+		console.error(error);
+
+		throw error;
+	}
+};
+
+export const cleanupSystem = async (serverId?: string) => {
+	try {
+		const command = cleanupCommands.system;
+
+		if (serverId) {
+			await execAsyncRemote(serverId, dockerSafeExec(command));
+		} else {
+			await execAsync(dockerSafeExec(command));
+		}
+	} catch (error) {
+		console.error(error);
+
+		throw error;
+	}
+};
+
+export interface DockerDiskUsageItem {
+	type: string;
+	totalCount: number;
+	active: number;
+	size: string;
+	reclaimable: string;
+	sizeBytes: number;
+}
+
+const parseSizeToBytes = (size: string): number => {
+	const match = size.match(/^([\d.]+)\s*([KMGT]?B)$/i);
+	if (!match) return 0;
+	const value = Number.parseFloat(match[1] as string);
+	const unit = (match[2] as string).toUpperCase();
+	const multipliers: Record<string, number> = {
+		B: 1,
+		KB: 1024,
+		MB: 1024 ** 2,
+		GB: 1024 ** 3,
+		TB: 1024 ** 4,
+	};
+	return value * (multipliers[unit] || 0);
+};
+
+export const getDockerDiskUsage = async (
+	serverId?: string,
+): Promise<DockerDiskUsageItem[]> => {
+	const command = "docker system df --format '{{json .}}'";
+	const { stdout } = serverId
+		? await execAsyncRemote(serverId, command)
+		: await execAsync(command);
+
+	const lines = stdout.trim().split("\n").filter(Boolean);
+	return lines.map((line) => {
+		const data = JSON.parse(line);
+		return {
+			type: data.Type,
+			totalCount: Number.parseInt(data.TotalCount, 10) || 0,
+			active: Number.parseInt(data.Active, 10) || 0,
+			size: data.Size,
+			reclaimable: data.Reclaimable,
+			sizeBytes: parseSizeToBytes(data.Size),
+		};
+	});
+};
+
+export interface DockerBuildCacheItem {
+	id: string;
+	type: string;
+	description: string;
+	size: string;
+	sizeBytes: number;
+	createdSince: string;
+	lastUsedSince: string;
+	usageCount: number;
+	shared: boolean;
+	inUse: boolean;
+}
+
+export const getBuildCache = async (
+	serverId?: string,
+): Promise<DockerBuildCacheItem[]> => {
+	try {
+		const command = "docker system df -v --format '{{json .}}'";
+		const { stdout } = serverId
+			? await execAsyncRemote(serverId, command)
+			: await execAsync(command);
+
+		const diskUsage = JSON.parse(stdout.trim());
+		return ((diskUsage?.BuildCache ?? []) as Record<string, string>[]).map(
+			(entry) => ({
+				id: entry.ID ?? "",
+				type: entry.CacheType ?? "",
+				description: entry.Description ?? "",
+				size: entry.Size ?? "",
+				sizeBytes: parseSizeToBytes(entry.Size ?? ""),
+				createdSince: entry.CreatedSince ?? "",
+				lastUsedSince: entry.LastUsedSince ?? "",
+				usageCount: Number.parseInt(entry.UsageCount ?? "0", 10) || 0,
+				shared: entry.Shared === "true",
+				inUse: entry.InUse === "true",
+			}),
 		);
-
-		for (const container of inactiveContainers) {
-			await docker.getContainer(container.Id).remove({ force: true });
-			console.log(`Cleaning up inactive container: ${container.Id}`);
-		}
 	} catch (error) {
-		console.error("Error cleaning up inactive containers:", error);
-		throw error;
+		console.error(error);
+		return [];
 	}
 };
 
-export const cleanUpDockerBuilder = async (serverId?: string) => {
-	if (serverId) {
-		await execAsyncRemote(serverId, "docker builder prune --all --force");
-	} else {
-		await execAsync("docker builder prune --all --force");
+/**
+ * Volume cleanup should always be performed manually by the user. The reason is that during automatic cleanup, a volume may be deleted due to a stopped container, which is a dangerous situation.
+ *
+ * https://github.com/Dokploy/dokploy/pull/3267
+ */
+const excludedCleanupAllCommands: (keyof typeof cleanupCommands)[] = [
+	"volumes",
+];
+
+export const cleanupAll = async (serverId?: string) => {
+	for (const [key, command] of Object.entries(cleanupCommands) as [
+		keyof typeof cleanupCommands,
+		string,
+	][]) {
+		if (excludedCleanupAllCommands.includes(key)) continue;
+
+		try {
+			if (serverId) {
+				await execAsyncRemote(serverId, dockerSafeExec(command));
+			} else {
+				await execAsync(dockerSafeExec(command));
+			}
+		} catch (error) {
+			console.error(
+				`Docker cleanup: "${key}" failed${serverId ? ` on server ${serverId}` : ""}`,
+				error,
+			);
+		}
 	}
 };
 
-export const cleanUpSystemPrune = async (serverId?: string) => {
-	if (serverId) {
-		await execAsyncRemote(
-			serverId,
-			"docker system prune --all --force --volumes",
-		);
-	} else {
-		await execAsync("docker system prune --all --force --volumes");
-	}
+export const cleanupAllBackground = async (serverId?: string) => {
+	Promise.allSettled(
+		(
+			Object.entries(cleanupCommands) as [
+				keyof typeof cleanupCommands,
+				string,
+			][]
+		)
+			.filter(([key]) => !excludedCleanupAllCommands.includes(key))
+			.map(async ([, command]) => {
+				if (serverId) {
+					await execAsyncRemote(serverId, dockerSafeExec(command));
+				} else {
+					await execAsync(dockerSafeExec(command));
+				}
+			}),
+	)
+		.then((results) => {
+			const failed = results.filter((r) => r.status === "rejected");
+			if (failed.length > 0) {
+				console.error(`Docker cleanup: ${failed.length} operations failed`);
+			} else {
+				console.log("Docker cleanup completed successfully");
+			}
+		})
+		.catch((error) => console.error("Error in cleanup:", error));
+
+	return {
+		status: "scheduled",
+		message: "Docker cleanup has been initiated in the background",
+	};
 };
 
 export const startService = async (appName: string) => {
@@ -245,9 +441,11 @@ export const startServiceRemote = async (serverId: string, appName: string) => {
 export const removeService = async (
 	appName: string,
 	serverId?: string | null,
+	_deleteVolumes = false,
 ) => {
 	try {
 		const command = `docker service rm ${appName}`;
+
 		if (serverId) {
 			await execAsyncRemote(serverId, command);
 		} else {
@@ -258,16 +456,125 @@ export const removeService = async (
 	}
 };
 
-export const prepareEnvironmentVariables = (env: string | null) =>
-	Object.entries(parse(env ?? "")).map(([key, value]) => `${key}=${value}`);
+export const prepareEnvironmentVariables = (
+	serviceEnv: string | null,
+	projectEnv?: string | null,
+	environmentEnv?: string | null,
+) => {
+	for (const source of [serviceEnv, projectEnv, environmentEnv]) {
+		if (source?.includes("${{vault.")) {
+			throw new Error(
+				"Unresolved vault reference: call withResolvedVaultRefs() on the entity before preparing environment variables",
+			);
+		}
+	}
+	const projectVars = parse(projectEnv ?? "");
+	const environmentVars = parse(environmentEnv ?? "");
+	const serviceVars = parse(serviceEnv ?? "");
 
-export const prepareBuildArgs = (input: string | null) => {
-	const pairs = (input ?? "").split("\n");
+	const resolvedVars = Object.entries(serviceVars).map(([key, value]) => {
+		let resolvedValue = value;
+
+		// Replace project variables
+		if (projectVars) {
+			resolvedValue = resolvedValue.replace(
+				/\$\{\{project\.(.*?)\}\}/g,
+				(_, ref) => {
+					if (projectVars[ref] !== undefined) {
+						return projectVars[ref];
+					}
+					throw new Error(
+						`Invalid project environment variable: project.${ref}`,
+					);
+				},
+			);
+		}
+
+		// Replace environment variables
+		if (environmentVars) {
+			resolvedValue = resolvedValue.replace(
+				/\$\{\{environment\.(.*?)\}\}/g,
+				(_, ref) => {
+					if (environmentVars[ref] !== undefined) {
+						return environmentVars[ref];
+					}
+					throw new Error(`Invalid environment variable: environment.${ref}`);
+				},
+			);
+		}
+
+		// Replace self-references (service variables)
+		resolvedValue = resolvedValue.replace(/\$\{\{(.*?)\}\}/g, (_, ref) => {
+			if (serviceVars[ref] !== undefined) {
+				return serviceVars[ref];
+			}
+			throw new Error(`Invalid service environment variable: ${ref}`);
+		});
+
+		return `${key}=${resolvedValue}`;
+	});
+
+	return resolvedVars;
+};
+
+export const prepareEnvironmentVariablesForShell = (
+	serviceEnv: string | null,
+	projectEnv?: string | null,
+	environmentEnv?: string | null,
+): string[] => {
+	const envVars = prepareEnvironmentVariables(
+		serviceEnv,
+		projectEnv,
+		environmentEnv,
+	);
+	// Using shell-quote library to properly escape shell arguments
+	// This is the standard way to handle special characters in shell commands
+	return envVars.map((env) => quote([env]));
+};
+
+export const prepareEnvironmentVariablesForFile = (
+	serviceEnv: string | null,
+	projectEnv?: string | null,
+	environmentEnv?: string | null,
+): string[] => {
+	const envVars = prepareEnvironmentVariables(
+		serviceEnv,
+		projectEnv,
+		environmentEnv,
+	);
+
+	return envVars.map((pair) => {
+		const [key, value] = parseEnvironmentKeyValuePair(pair);
+		const escapedValue = value
+			.replace(/\\/g, "\\\\")
+			.replace(/"/g, '\\"')
+			.replace(/\$(?!\{[A-Za-z_][A-Za-z0-9_]*(?::?[-+?][^{}]*)?\})/g, "\\$");
+		return `${key}="${escapedValue}"`;
+	});
+};
+
+export const parseEnvironmentKeyValuePair = (
+	pair: string,
+): [string, string] => {
+	const [key, ...valueParts] = pair.split("=");
+	if (!key || !valueParts.length) {
+		throw new Error(`Invalid environment variable pair: ${pair}`);
+	}
+
+	return [key, valueParts.join("=")];
+};
+
+export const getEnvironmentVariablesObject = (
+	input: string | null,
+	projectEnv?: string | null,
+	environmentEnv?: string | null,
+) => {
+	const envs = prepareEnvironmentVariables(input, projectEnv, environmentEnv);
 
 	const jsonObject: Record<string, string> = {};
 
-	for (const pair of pairs) {
-		const [key, value] = pair.split("=");
+	for (const pair of envs) {
+		const [key, value] = parseEnvironmentKeyValuePair(pair);
 		if (key && value) {
 			jsonObject[key] = value;
 		}
@@ -291,10 +598,10 @@ export const generateVolumeMounts = (mounts: ApplicationNested["mounts"]) => {
 };
 
 type Resources = {
-	memoryLimit: number | null;
-	memoryReservation: number | null;
-	cpuLimit: number | null;
-	cpuReservation: number | null;
+	memoryLimit: string | null;
+	memoryReservation: string | null;
+	cpuLimit: string | null;
+	cpuReservation: string | null;
 };
 export const calculateResources = ({
 	memoryLimit,
@@ -304,21 +611,21 @@ export const calculateResources = ({
 }: Resources): ResourceRequirements => {
 	return {
 		Limits: {
-			MemoryBytes: memoryLimit ? memoryLimit * 1024 * 1024 : undefined,
-			NanoCPUs: memoryLimit ? (cpuLimit || 1) * 1000 * 1000 * 1000 : undefined,
+			MemoryBytes: memoryLimit ? Number.parseInt(memoryLimit) : undefined,
+			NanoCPUs: cpuLimit ? Number.parseInt(cpuLimit) : undefined,
 		},
 		Reservations: {
-			MemoryBytes: memoryLimit
-				? (memoryReservation || 1) * 1024 * 1024
+			MemoryBytes: memoryReservation
+				? Number.parseInt(memoryReservation)
 				: undefined,
-			NanoCPUs: memoryLimit
-				? (cpuReservation || 1) * 1000 * 1000 * 1000
-				: undefined,
+			NanoCPUs: cpuReservation ? Number.parseInt(cpuReservation) : undefined,
 		},
 	};
 };
 
-export const generateConfigContainer = (application: ApplicationNested) => {
+export const generateConfigContainer = (
+	application: Partial<ApplicationNested>,
+) => {
 	const {
 		healthCheckSwarm,
 		restartPolicySwarm,
@@ -329,20 +636,20 @@ export const generateConfigContainer = (application: ApplicationNested) => {
 		labelsSwarm,
 		replicas,
 		mounts,
-		networkSwarm,
+		stopGracePeriodSwarm,
+		endpointSpecSwarm,
+		ulimitsSwarm,
 	} = application;
 
-	const haveMounts = mounts.length > 0;
+	const haveMounts = mounts && mounts.length > 0;
 
 	return {
 		...(healthCheckSwarm && {
 			HealthCheck: healthCheckSwarm,
 		}),
-		...(restartPolicySwarm
-			? {
-					RestartPolicy: restartPolicySwarm,
-				}
-			: {}),
+		...(restartPolicySwarm && {
+			RestartPolicy: restartPolicySwarm,
+		}),
 		...(placementSwarm
 			? {
 					Placement: placementSwarm,
@@ -368,9 +675,15 @@ export const generateConfigContainer = (application: ApplicationNested) => {
 						},
 					},
 				}),
-		...(rollbackConfigSwarm && {
-			RollbackConfig: rollbackConfigSwarm,
-		}),
+		...(rollbackConfigSwarm
+			? { RollbackConfig: rollbackConfigSwarm }
+			: {
+					// default rollback config to match update config
+					RollbackConfig: {
+						Parallelism: 1,
+						Order: "start-first",
+					},
+				}),
 		...(updateConfigSwarm
 			? { UpdateConfig: updateConfigSwarm }
 			: {
@@ -378,15 +691,29 @@ export const generateConfigContainer = (application: ApplicationNested) => {
 					UpdateConfig: {
 						Parallelism: 1,
 						Order: "start-first",
+						FailureAction: "rollback",
 					},
 				}),
-		...(networkSwarm
-			? {
-					Networks: networkSwarm,
-				}
-			: {
-					Networks: [{ Target: "dokploy-network" }],
-				}),
+		...(stopGracePeriodSwarm !== null &&
+			stopGracePeriodSwarm !== undefined && {
+				StopGracePeriod: stopGracePeriodSwarm,
+			}),
+		...(endpointSpecSwarm && {
+			EndpointSpec: {
+				...(endpointSpecSwarm.Mode && { Mode: endpointSpecSwarm.Mode }),
+				Ports:
+					endpointSpecSwarm.Ports?.map((port) => ({
+						Protocol: (port.Protocol || "tcp") as "tcp" | "udp" | "sctp",
+						TargetPort: port.TargetPort || 0,
+						PublishedPort: port.PublishedPort || 0,
+						PublishMode: (port.PublishMode || "host") as "ingress" | "host",
+					})) || [],
+			},
+		}),
+		...(ulimitsSwarm &&
+			ulimitsSwarm.length > 0 && {
+				Ulimits: ulimitsSwarm,
+			}),
 	};
 };
 
@@ -408,6 +735,7 @@ export const generateFileMounts = (
 	appName: string,
 	service:
 		| ApplicationNested
+		| LibsqlNested
 		| MongoNested
 		| MariadbNested
 		| MysqlNested
@@ -464,43 +792,20 @@ export const getCreateFileCommand = (
 ) => {
 	const fullPath = path.join(outputPath, filePath);
 	if (fullPath.endsWith(path.sep) || filePath.endsWith("/")) {
-		return `mkdir -p ${fullPath};`;
+		return `mkdir -p ${quote([fullPath])};`;
 	}
 
 	const directory = path.dirname(fullPath);
 	const encodedContent = encodeBase64(content);
 	return `
-		mkdir -p ${directory};
-		echo "${encodedContent}" | base64 -d > "${fullPath}";
+		mkdir -p ${quote([directory])};
+		echo "${encodedContent}" | base64 -d > ${quote([fullPath])};
 	`;
 };
 
-export const getServiceContainer = async (appName: string) => {
-	try {
-		const filter = {
-			status: ["running"],
-			label: [`com.docker.swarm.service.name=${appName}`],
-		};
-
-		const containers = await docker.listContainers({
-			filters: JSON.stringify(filter),
-		});
-
-		if (containers.length === 0 || !containers[0]) {
-			throw new Error(`No container found with name: ${appName}`);
-		}
-
-		const container = containers[0];
-
-		return container;
-	} catch (error) {
-		throw error;
-	}
-};
-
-export const getRemoteServiceContainer = async (
-	serverId: string,
+export const getServiceContainer = async (
 	appName: string,
+	serverId?: string | null,
 ) => {
 	try {
 		const filter = {
@@ -513,7 +818,7 @@ export const getRemoteServiceContainer = async (
 		});
 
 		if (containers.length === 0 || !containers[0]) {
-			throw new Error(`No container found with name: ${appName}`);
+			return null;
 		}
 
 		const container = containers[0];
@@ -521,5 +826,225 @@ export const getRemoteServiceContainer = async (
 		return container;
 	} catch (error) {
 		throw error;
+	}
+};
+
+export const getComposeContainer = async (
+	compose: Compose,
+	serviceName: string,
+) => {
+	try {
+		const { appName, composeType, serverId } = compose;
+		// 1. Determine the correct labels based on composeType
+		const labels: string[] = [];
+		if (composeType === "stack") {
+			// Labels for Docker Swarm stack services
+			labels.push(`com.docker.stack.namespace=${appName}`);
+			labels.push(`com.docker.swarm.service.name=${appName}_${serviceName}`);
+		} else {
+			// Labels for Docker Compose projects (default)
+			labels.push(`com.docker.compose.project=${appName}`);
+			labels.push(`com.docker.compose.service=${serviceName}`);
+		}
+		const filter = {
+			status: ["running"],
+			label: labels,
+		};
+
+		const remoteDocker = await getRemoteDocker(serverId);
+		const containers = await remoteDocker.listContainers({
+			filters: JSON.stringify(filter),
+			limit: 1,
+		});
+
+		if (containers.length === 0 || !containers[0]) {
+			return null;
+		}
+
+		const container = containers[0];
+		return container;
+	} catch (error) {
+		throw error;
+	}
+};
+
+type ServiceHealthStatus = {
+	status: "healthy" | "unhealthy";
+	message?: string;
+};
+
+const checkSwarmServiceRunning = async (
+	serviceName: string,
+): Promise<ServiceHealthStatus> => {
+	try {
+		const service = docker.getService(serviceName);
+		const info = await service.inspect();
+		const replicas = info.Spec?.Mode?.Replicated?.Replicas ?? 0;
+		if (replicas === 0) {
+			return {
+				status: "unhealthy",
+				message: "Service has 0 replicas configured",
+			};
+		}
+
+		// Check that at least one task is actually running
+		const tasks = await docker.listTasks({
+			filters: JSON.stringify({
+				service: [serviceName],
+				"desired-state": ["running"],
+			}),
+		});
+
+		const runningTask = tasks.find((t) => t.Status?.State === "running");
+
+		if (!runningTask) {
+			const latestTask = tasks[0];
+			const taskState = latestTask?.Status?.State ?? "unknown";
+			return {
+				status: "unhealthy",
+				message: `No running tasks (current state: ${taskState})`,
+			};
+		}
+
+		return { status: "healthy" };
+	} catch (error) {
+		return {
+			status: "unhealthy",
+			message: error instanceof Error ? error.message : "Service not found",
+		};
+	}
+};
+
+const getSwarmServiceContainerId = async (
+	serviceName: string,
+): Promise<string | null> => {
+	try {
+		const tasks = await docker.listTasks({
+			filters: JSON.stringify({
+				service: [serviceName],
+				"desired-state": ["running"],
+			}),
+		});
+
+		const runningTask = tasks.find((t) => t.Status?.State === "running");
+
+		return runningTask?.Status?.ContainerStatus?.ContainerID ?? null;
+	} catch {
+		return null;
+	}
+};
+
+export class ServiceConvergenceError extends Error {}
+
+export const waitForSwarmServiceConvergence = async (
+	appName: string,
+	serverId?: string | null,
+	options?: { timeoutMs?: number; intervalMs?: number },
+): Promise<void> => {
+	const timeoutMs = options?.timeoutMs ?? 45_000;
+	const intervalMs = options?.intervalMs ?? 2_000;
+	const remoteDocker = await getRemoteDocker(serverId);
+	const service = remoteDocker.getService(appName);
+	const deadline = Date.now() + timeoutMs;
+
+	let lastState = "unknown";
+	while (true) {
+		const info = await service.inspect();
+		const desiredTasksCount = info.Spec?.Mode?.Replicated?.Replicas ?? 1;
+
+		const tasks = await remoteDocker.listTasks({
+			filters: JSON.stringify({ service: [appName] }),
+		});
+		const currentTasks = tasks.filter(
+			(task) => task.DesiredState === "running",
+		);
+		const runningTasksCount = currentTasks.filter(
+			(task) => task.Status?.State === "running",
+		).length;
+
+		if (runningTasksCount >= desiredTasksCount) {
+			return;
+		}
+
+		const failedTask = currentTasks.find((task) =>
+			["failed", "rejected"].includes(task.Status?.State ?? ""),
+		);
+		lastState =
+			failedTask?.Status?.Err ??
+			failedTask?.Status?.State ??
+			currentTasks[0]?.Status?.State ??
+			lastState;
+
+		if (Date.now() >= deadline) {
+			throw new ServiceConvergenceError(
+				`Service ${appName} did not converge within ${timeoutMs}ms: ${runningTasksCount}/${desiredTasksCount} tasks running (last state: ${lastState})`,
+			);
+		}
+
+		await new Promise((resolve) => setTimeout(resolve, intervalMs));
+	}
+};
+
+export const checkPostgresHealth = async (): Promise<ServiceHealthStatus> => {
+	const serviceCheck = await checkSwarmServiceRunning("dokploy-postgres");
+	if (serviceCheck.status === "unhealthy") {
+		return serviceCheck;
+	}
+
+	// Verify PostgreSQL actually accepts connections
+	const containerId = await getSwarmServiceContainerId("dokploy-postgres");
+	if (!containerId) {
+		return { status: "unhealthy", message: "Could not find running container" };
+	}
+
+	try {
+		const exec = await docker.getContainer(containerId).exec({
+			Cmd: ["pg_isready", "-U", "dokploy"],
+			AttachStdout: true,
+			AttachStderr: true,
+		});
+		const stream = await exec.start({});
+
+		const output = await new Promise<string>((resolve) => {
+			let data = "";
+			stream.on("data", (chunk: Buffer) => {
+				data += chunk.toString();
+			});
+			stream.on("end", () => resolve(data));
+		});
+
+		const inspectResult = await exec.inspect();
+		if (inspectResult.ExitCode !== 0) {
+			return {
+				status: "unhealthy",
+				message: `PostgreSQL not ready: ${output.trim()}`,
+			};
+		}
+
+		return { status: "healthy" };
+	} catch (error) {
+		return {
+			status: "unhealthy",
+			message:
+				error instanceof Error ? error.message : "Failed to check PostgreSQL",
+		};
+	}
+};
+
+export const checkTraefikHealth = async (): Promise<ServiceHealthStatus> => {
+	// Traefik can run as a standalone container or a swarm service
+	try {
+		const container = docker.getContainer("dokploy-traefik");
+		const info = await container.inspect();
+		if (!info.State.Running) {
+			return {
+				status: "unhealthy",
+				message: "Container is not running",
+			};
+		}
+		return { status: "healthy" };
+	} catch {
+		// Not a standalone container, check as swarm service
+		return checkSwarmServiceRunning("dokploy-traefik");
 	}
 };

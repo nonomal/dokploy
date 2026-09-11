@@ -2,11 +2,16 @@ import { serve } from "@hono/node-server";
 import { Hono } from "hono";
 import "dotenv/config";
 import { zValidator } from "@hono/zod-validator";
-import { logger } from "./logger";
-import { cleanQueue, getJobRepeatable, removeJob, scheduleJob } from "./queue";
-import { jobQueueSchema } from "./schema";
-import { initializeJobs } from "./utils";
-import { firstWorker, secondWorker } from "./workers";
+import { logger } from "./logger.js";
+import {
+	cleanQueue,
+	getJobRepeatable,
+	removeJob,
+	scheduleJob,
+} from "./queue.js";
+import { jobQueueSchema } from "./schema.js";
+import { initializeJobs } from "./utils.js";
+import { firstWorker, secondWorker, thirdWorker } from "./workers.js";
 
 const app = new Hono();
 
@@ -28,9 +33,9 @@ app.use(async (c, next) => {
 
 app.post("/create-backup", zValidator("json", jobQueueSchema), async (c) => {
 	const data = c.req.valid("json");
-	scheduleJob(data);
-	logger.info({ data }, "Backup created successfully");
-	return c.json({ message: "Backup created successfully" });
+	await scheduleJob(data);
+	logger.info({ data }, `[${data.type}]  created successfully`);
+	return c.json({ message: `[${data.type}]  created successfully` });
 });
 
 app.post("/update-backup", zValidator("json", jobQueueSchema), async (c) => {
@@ -42,18 +47,31 @@ app.post("/update-backup", zValidator("json", jobQueueSchema), async (c) => {
 			result = await removeJob({
 				backupId: data.backupId,
 				type: "backup",
-				cronSchedule: job.pattern,
+				cronSchedule: job.pattern || "",
 			});
 		} else if (data.type === "server") {
 			result = await removeJob({
 				serverId: data.serverId,
 				type: "server",
-				cronSchedule: job.pattern,
+				cronSchedule: job.pattern || "",
+			});
+		} else if (data.type === "schedule") {
+			result = await removeJob({
+				scheduleId: data.scheduleId,
+				type: "schedule",
+				cronSchedule: job.pattern || "",
+				timezone: job.tz || data.timezone,
+			});
+		} else if (data.type === "volume-backup") {
+			result = await removeJob({
+				volumeBackupId: data.volumeBackupId,
+				type: "volume-backup",
+				cronSchedule: job.pattern || "",
 			});
 		}
 		logger.info({ result }, "Job removed");
 	}
-	scheduleJob(data);
+	await scheduleJob(data);
 	logger.info("Backup updated successfully");
 
 	return c.json({ message: "Backup updated successfully" });
@@ -74,6 +92,7 @@ export const gracefulShutdown = async (signal: string) => {
 	logger.warn(`Received ${signal}, closing server...`);
 	await firstWorker.close();
 	await secondWorker.close();
+	await thirdWorker.close();
 	process.exit(0);
 };
 
@@ -85,8 +104,11 @@ process.on("uncaughtException", (err) => {
 	logger.error(err, "Uncaught exception");
 });
 
-process.on("unhandledRejection", (reason, promise) => {
-	logger.error({ promise, reason }, "Unhandled Rejection at: Promise");
+process.on("unhandledRejection", (reason, _promise) => {
+	logger.error(
+		reason instanceof Error ? reason : { reason: String(reason) },
+		"Unhandled Rejection at: Promise",
+	);
 });
 
 const port = Number.parseInt(process.env.PORT || "3000");

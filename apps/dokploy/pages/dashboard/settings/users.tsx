@@ -1,17 +1,26 @@
-import { ShowUsers } from "@/components/dashboard/settings/users/show-users";
-import { DashboardLayout } from "@/components/layouts/dashboard-layout";
-import { SettingsLayout } from "@/components/layouts/settings-layout";
-import { appRouter } from "@/server/api/root";
 import { validateRequest } from "@dokploy/server";
 import { createServerSideHelpers } from "@trpc/react-query/server";
 import type { GetServerSidePropsContext } from "next";
-import React, { type ReactElement } from "react";
+import type { ReactElement } from "react";
 import superjson from "superjson";
+import { ShowInvitations } from "@/components/dashboard/settings/users/show-invitations";
+import { ShowUsers } from "@/components/dashboard/settings/users/show-users";
+import { DashboardLayout } from "@/components/layouts/dashboard-layout";
+import { ManageCustomRoles } from "@/components/proprietary/roles/manage-custom-roles";
+import { appRouter } from "@/server/api/root";
+import { api } from "@/utils/api";
 
 const Page = () => {
+	const { data: auth } = api.user.get.useQuery();
+	const { data: permissions } = api.user.getPermissions.useQuery();
+	const isOwnerOrAdmin = auth?.role === "owner" || auth?.role === "admin";
+	const canCreateMembers = permissions?.member.create ?? false;
+
 	return (
 		<div className="flex flex-col gap-4 w-full">
 			<ShowUsers />
+			{canCreateMembers && <ShowInvitations />}
+			{isOwnerOrAdmin && <ManageCustomRoles />}
 		</div>
 	);
 };
@@ -19,21 +28,18 @@ const Page = () => {
 export default Page;
 
 Page.getLayout = (page: ReactElement) => {
-	return (
-		<DashboardLayout tab={"settings"}>
-			<SettingsLayout>{page}</SettingsLayout>
-		</DashboardLayout>
-	);
+	return <DashboardLayout metaName="Users">{page}</DashboardLayout>;
 };
 export async function getServerSideProps(
 	ctx: GetServerSidePropsContext<{ serviceId: string }>,
 ) {
 	const { req, res } = ctx;
-	const { user, session } = await validateRequest(req, res);
-	if (!user || user.rol === "user") {
+	const { user, session } = await validateRequest(req);
+
+	if (!user) {
 		return {
 			redirect: {
-				permanent: true,
+				permanent: false,
 				destination: "/",
 			},
 		};
@@ -45,17 +51,35 @@ export async function getServerSideProps(
 			req: req as any,
 			res: res as any,
 			db: null as any,
-			session: session,
-			user: user,
+			session: session as any,
+			user: user as any,
 		},
 		transformer: superjson,
 	});
 
-	await helpers.settings.isCloud.prefetch();
+	try {
+		await helpers.user.get.prefetch();
+		await helpers.settings.isCloud.prefetch();
 
-	return {
-		props: {
-			trpcState: helpers.dehydrate(),
-		},
-	};
+		const userPermissions = await helpers.user.getPermissions.fetch();
+
+		if (!userPermissions?.member.read) {
+			return {
+				redirect: {
+					permanent: false,
+					destination: "/",
+				},
+			};
+		}
+
+		return {
+			props: {
+				trpcState: helpers.dehydrate(),
+			},
+		};
+	} catch {
+		return {
+			props: {},
+		};
+	}
 }

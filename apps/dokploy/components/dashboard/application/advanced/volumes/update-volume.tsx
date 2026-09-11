@@ -1,8 +1,14 @@
+import { standardSchemaResolver as zodResolver } from "@hookform/resolvers/standard-schema";
+import { PenBoxIcon } from "lucide-react";
+import { useEffect, useState } from "react";
+import { useForm } from "react-hook-form";
+import { toast } from "sonner";
+import { z } from "zod";
 import { AlertBlock } from "@/components/shared/alert-block";
+import { CodeEditor } from "@/components/shared/code-editor";
 import { Button } from "@/components/ui/button";
 import {
 	Dialog,
-	DialogClose,
 	DialogContent,
 	DialogDescription,
 	DialogFooter,
@@ -19,14 +25,7 @@ import {
 	FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
-import { Textarea } from "@/components/ui/textarea";
 import { api } from "@/utils/api";
-import { zodResolver } from "@hookform/resolvers/zod";
-import { Pencil } from "lucide-react";
-import { useEffect, useState } from "react";
-import { useForm } from "react-hook-form";
-import { toast } from "sonner";
-import { z } from "zod";
 
 const mountSchema = z.object({
 	mountPath: z.string().min(1, "Mount path required"),
@@ -42,7 +41,13 @@ const mySchema = z.discriminatedUnion("type", [
 	z
 		.object({
 			type: z.literal("volume"),
-			volumeName: z.string().min(1, "Volume name required"),
+			volumeName: z
+				.string()
+				.min(1, "Volume name required")
+				.regex(
+					/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/,
+					"Invalid volume name. Use letters, numbers, '._-' and start with a letter/number.",
+				),
 		})
 		.merge(mountSchema),
 	z
@@ -62,13 +67,13 @@ interface Props {
 	refetch: () => void;
 	serviceType:
 		| "application"
-		| "postgres"
-		| "redis"
-		| "mongo"
-		| "redis"
-		| "mysql"
+		| "compose"
+		| "libsql"
 		| "mariadb"
-		| "compose";
+		| "mongo"
+		| "mysql"
+		| "postgres"
+		| "redis";
 }
 
 export const UpdateVolume = ({
@@ -78,7 +83,7 @@ export const UpdateVolume = ({
 	serviceType,
 }: Props) => {
 	const [isOpen, setIsOpen] = useState(false);
-	const utils = api.useUtils();
+	const _utils = api.useUtils();
 	const { data } = api.mounts.one.useQuery(
 		{
 			mountId,
@@ -88,7 +93,7 @@ export const UpdateVolume = ({
 		},
 	);
 
-	const { mutateAsync, isLoading, error, isError } =
+	const { mutateAsync, isPending, error, isError } =
 		api.mounts.update.useMutation();
 
 	const form = useForm<UpdateMount>({
@@ -119,7 +124,7 @@ export const UpdateVolume = ({
 			} else if (typeForm === "file") {
 				form.reset({
 					content: data.content || "",
-					mountPath: data.mountPath,
+					mountPath: serviceType === "compose" ? "/" : data.mountPath,
 					filePath: data.filePath || "",
 					type: "file",
 				});
@@ -140,7 +145,7 @@ export const UpdateVolume = ({
 					setIsOpen(false);
 				})
 				.catch(() => {
-					toast.error("Error to update the Bind mount");
+					toast.error("Error updating the Bind mount");
 				});
 		} else if (data.type === "volume") {
 			await mutateAsync({
@@ -154,7 +159,7 @@ export const UpdateVolume = ({
 					setIsOpen(false);
 				})
 				.catch(() => {
-					toast.error("Error to update the Volume mount");
+					toast.error("Error updating the Volume mount");
 				});
 		} else if (data.type === "file") {
 			await mutateAsync({
@@ -169,7 +174,7 @@ export const UpdateVolume = ({
 					setIsOpen(false);
 				})
 				.catch(() => {
-					toast.error("Error to update the File mount");
+					toast.error("Error updating the File mount");
 				});
 		}
 		refetch();
@@ -178,11 +183,16 @@ export const UpdateVolume = ({
 	return (
 		<Dialog open={isOpen} onOpenChange={setIsOpen}>
 			<DialogTrigger asChild>
-				<Button variant="ghost" isLoading={isLoading}>
-					<Pencil className="size-4  text-muted-foreground" />
+				<Button
+					variant="ghost"
+					size="icon"
+					className="group hover:bg-blue-500/10 "
+					isLoading={isPending}
+				>
+					<PenBoxIcon className="size-3.5  text-primary group-hover:text-blue-500" />
 				</Button>
 			</DialogTrigger>
-			<DialogContent className="max-h-screen  overflow-y-auto sm:max-w-lg">
+			<DialogContent className="sm:max-w-3xl">
 				<DialogHeader>
 					<DialogTitle>Update</DialogTitle>
 					<DialogDescription>Update the mount</DialogDescription>
@@ -243,13 +253,16 @@ export const UpdateVolume = ({
 										control={form.control}
 										name="content"
 										render={({ field }) => (
-											<FormItem>
+											<FormItem className="w-full max-w-180">
 												<FormLabel>Content</FormLabel>
 												<FormControl>
 													<FormControl>
-														<Textarea
-															placeholder="Any content"
-															className="h-64"
+														<CodeEditor
+															language="properties"
+															placeholder={`NODE_ENV=production
+PORT=3000
+`}
+															className="h-96 font-mono w-full"
 															{...field}
 														/>
 													</FormControl>
@@ -296,15 +309,13 @@ export const UpdateVolume = ({
 							)}
 						</div>
 						<DialogFooter>
-							<DialogClose>
-								<Button
-									isLoading={isLoading}
-									form="hook-form-update-volume"
-									type="submit"
-								>
-									Update
-								</Button>
-							</DialogClose>
+							<Button
+								isLoading={isPending}
+								// form="hook-form-update-volume"
+								type="submit"
+							>
+								Update
+							</Button>
 						</DialogFooter>
 					</form>
 				</Form>

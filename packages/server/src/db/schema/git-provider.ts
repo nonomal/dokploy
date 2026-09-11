@@ -1,17 +1,19 @@
 import { relations } from "drizzle-orm";
-import { pgEnum, pgTable, text } from "drizzle-orm/pg-core";
-import { createInsertSchema } from "drizzle-zod";
+import { boolean, pgEnum, pgTable, text } from "drizzle-orm/pg-core";
 import { nanoid } from "nanoid";
 import { z } from "zod";
-import { admins } from "./admin";
+import { organization } from "./account";
 import { bitbucket } from "./bitbucket";
+import { gitea } from "./gitea";
 import { github } from "./github";
 import { gitlab } from "./gitlab";
+import { user } from "./user";
 
 export const gitProviderType = pgEnum("gitProviderType", [
 	"github",
 	"gitlab",
 	"bitbucket",
+	"gitea",
 ]);
 
 export const gitProvider = pgTable("git_provider", {
@@ -24,12 +26,18 @@ export const gitProvider = pgTable("git_provider", {
 	createdAt: text("createdAt")
 		.notNull()
 		.$defaultFn(() => new Date().toISOString()),
-	adminId: text("adminId").references(() => admins.adminId, {
-		onDelete: "cascade",
-	}),
+	organizationId: text("organizationId")
+		.notNull()
+		.references(() => organization.id, { onDelete: "cascade" }),
+	userId: text("userId")
+		.notNull()
+		.references(() => user.id, { onDelete: "cascade" }),
+	sharedWithOrganization: boolean("sharedWithOrganization")
+		.notNull()
+		.default(false),
 });
 
-export const gitProviderRelations = relations(gitProvider, ({ one, many }) => ({
+export const gitProviderRelations = relations(gitProvider, ({ one }) => ({
 	github: one(github, {
 		fields: [gitProvider.gitProviderId],
 		references: [github.gitProviderId],
@@ -42,16 +50,25 @@ export const gitProviderRelations = relations(gitProvider, ({ one, many }) => ({
 		fields: [gitProvider.gitProviderId],
 		references: [bitbucket.gitProviderId],
 	}),
-	admin: one(admins, {
-		fields: [gitProvider.adminId],
-		references: [admins.adminId],
+	gitea: one(gitea, {
+		fields: [gitProvider.gitProviderId],
+		references: [gitea.gitProviderId],
+	}),
+	organization: one(organization, {
+		fields: [gitProvider.organizationId],
+		references: [organization.id],
+	}),
+	user: one(user, {
+		fields: [gitProvider.userId],
+		references: [user.id],
 	}),
 }));
 
-const createSchema = createInsertSchema(gitProvider);
+export const apiRemoveGitProvider = z.object({
+	gitProviderId: z.string().min(1),
+});
 
-export const apiRemoveGitProvider = createSchema
-	.extend({
-		gitProviderId: z.string().min(1),
-	})
-	.pick({ gitProviderId: true });
+export const apiToggleShareGitProvider = z.object({
+	gitProviderId: z.string().min(1),
+	sharedWithOrganization: z.boolean(),
+});

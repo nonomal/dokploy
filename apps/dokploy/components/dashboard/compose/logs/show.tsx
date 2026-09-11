@@ -1,3 +1,9 @@
+import { Loader2 } from "lucide-react";
+import dynamic from "next/dynamic";
+import { useEffect, useState } from "react";
+import { badgeStateColor } from "@/components/dashboard/application/logs/show";
+import { resolveContainerSelection } from "@/components/dashboard/docker/logs/utils";
+import { Badge } from "@/components/ui/badge";
 import {
 	Card,
 	CardContent,
@@ -16,9 +22,6 @@ import {
 	SelectValue,
 } from "@/components/ui/select";
 import { api } from "@/utils/api";
-import { Loader, Loader2 } from "lucide-react";
-import dynamic from "next/dynamic";
-import { useEffect, useState } from "react";
 export const DockerLogs = dynamic(
 	() =>
 		import("@/components/dashboard/docker/logs/docker-logs-id").then(
@@ -33,14 +36,16 @@ interface Props {
 	appName: string;
 	serverId?: string;
 	appType: "stack" | "docker-compose";
+	serviceId?: string;
 }
 
 export const ShowDockerLogsCompose = ({
 	appName,
 	appType,
 	serverId,
+	serviceId,
 }: Props) => {
-	const { data, isLoading } = api.docker.getContainersByAppNameMatch.useQuery(
+	const { data, isPending } = api.docker.getContainersByAppNameMatch.useQuery(
 		{
 			appName,
 			appType,
@@ -48,14 +53,15 @@ export const ShowDockerLogsCompose = ({
 		},
 		{
 			enabled: !!appName,
+			refetchInterval: 5000,
 		},
 	);
 	const [containerId, setContainerId] = useState<string | undefined>();
 
 	useEffect(() => {
-		if (data && data?.length > 0) {
-			setContainerId(data[0]?.containerId);
-		}
+		setContainerId((currentContainerId) =>
+			resolveContainerSelection(currentContainerId, data),
+		);
 	}, [data]);
 
 	return (
@@ -71,7 +77,7 @@ export const ShowDockerLogsCompose = ({
 				<Label>Select a container to view logs</Label>
 				<Select onValueChange={setContainerId} value={containerId}>
 					<SelectTrigger>
-						{isLoading ? (
+						{isPending ? (
 							<div className="flex flex-row gap-2 items-center justify-center text-sm text-muted-foreground">
 								<span>Loading...</span>
 								<Loader2 className="animate-spin size-4" />
@@ -87,7 +93,11 @@ export const ShowDockerLogsCompose = ({
 									key={container.containerId}
 									value={container.containerId}
 								>
-									{container.name} ({container.containerId}) {container.state}
+									{container.name} ({container.containerId}){" "}
+									<Badge variant={badgeStateColor(container.state)}>
+										{container.state}
+									</Badge>
+									{container.status ? ` ${container.status}` : ""}
 								</SelectItem>
 							))}
 							<SelectLabel>Containers ({data?.length})</SelectLabel>
@@ -96,8 +106,9 @@ export const ShowDockerLogsCompose = ({
 				</Select>
 				<DockerLogs
 					serverId={serverId || ""}
-					id="terminal"
 					containerId={containerId || "select-a-container"}
+					runType="native"
+					serviceId={serviceId}
 				/>
 			</CardContent>
 		</Card>

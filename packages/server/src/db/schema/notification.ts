@@ -1,15 +1,30 @@
 import { relations } from "drizzle-orm";
-import { boolean, integer, pgEnum, pgTable, text } from "drizzle-orm/pg-core";
+import {
+	boolean,
+	integer,
+	jsonb,
+	pgEnum,
+	pgTable,
+	text,
+} from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { nanoid } from "nanoid";
 import { z } from "zod";
-import { admins } from "./admin";
+import { organization } from "./account";
 
 export const notificationType = pgEnum("notificationType", [
 	"slack",
 	"telegram",
 	"discord",
 	"email",
+	"resend",
+	"gotify",
+	"ntfy",
+	"mattermost",
+	"pushover",
+	"custom",
+	"lark",
+	"teams",
 ]);
 
 export const notifications = pgTable("notification", {
@@ -21,8 +36,11 @@ export const notifications = pgTable("notification", {
 	appDeploy: boolean("appDeploy").notNull().default(false),
 	appBuildError: boolean("appBuildError").notNull().default(false),
 	databaseBackup: boolean("databaseBackup").notNull().default(false),
+	volumeBackup: boolean("volumeBackup").notNull().default(false),
 	dokployRestart: boolean("dokployRestart").notNull().default(false),
+	dokployBackup: boolean("dokployBackup").notNull().default(false),
 	dockerCleanup: boolean("dockerCleanup").notNull().default(false),
+	serverThreshold: boolean("serverThreshold").notNull().default(false),
 	notificationType: notificationType("notificationType").notNull(),
 	createdAt: text("createdAt")
 		.notNull()
@@ -39,9 +57,33 @@ export const notifications = pgTable("notification", {
 	emailId: text("emailId").references(() => email.emailId, {
 		onDelete: "cascade",
 	}),
-	adminId: text("adminId").references(() => admins.adminId, {
+	resendId: text("resendId").references(() => resend.resendId, {
 		onDelete: "cascade",
 	}),
+	gotifyId: text("gotifyId").references(() => gotify.gotifyId, {
+		onDelete: "cascade",
+	}),
+	ntfyId: text("ntfyId").references(() => ntfy.ntfyId, {
+		onDelete: "cascade",
+	}),
+	mattermostId: text("mattermostId").references(() => mattermost.mattermostId, {
+		onDelete: "cascade",
+	}),
+	customId: text("customId").references(() => custom.customId, {
+		onDelete: "cascade",
+	}),
+	larkId: text("larkId").references(() => lark.larkId, {
+		onDelete: "cascade",
+	}),
+	pushoverId: text("pushoverId").references(() => pushover.pushoverId, {
+		onDelete: "cascade",
+	}),
+	teamsId: text("teamsId").references(() => teams.teamsId, {
+		onDelete: "cascade",
+	}),
+	organizationId: text("organizationId")
+		.notNull()
+		.references(() => organization.id, { onDelete: "cascade" }),
 });
 
 export const slack = pgTable("slack", {
@@ -60,6 +102,7 @@ export const telegram = pgTable("telegram", {
 		.$defaultFn(() => nanoid()),
 	botToken: text("botToken").notNull(),
 	chatId: text("chatId").notNull(),
+	messageThreadId: text("messageThreadId"),
 });
 
 export const discord = pgTable("discord", {
@@ -68,6 +111,7 @@ export const discord = pgTable("discord", {
 		.primaryKey()
 		.$defaultFn(() => nanoid()),
 	webhookUrl: text("webhookUrl").notNull(),
+	decoration: boolean("decoration"),
 });
 
 export const email = pgTable("email", {
@@ -81,6 +125,85 @@ export const email = pgTable("email", {
 	password: text("password").notNull(),
 	fromAddress: text("fromAddress").notNull(),
 	toAddresses: text("toAddress").array().notNull(),
+});
+
+export const resend = pgTable("resend", {
+	resendId: text("resendId")
+		.notNull()
+		.primaryKey()
+		.$defaultFn(() => nanoid()),
+	apiKey: text("apiKey").notNull(),
+	fromAddress: text("fromAddress").notNull(),
+	toAddresses: text("toAddress").array().notNull(),
+});
+
+export const gotify = pgTable("gotify", {
+	gotifyId: text("gotifyId")
+		.notNull()
+		.primaryKey()
+		.$defaultFn(() => nanoid()),
+	serverUrl: text("serverUrl").notNull(),
+	appToken: text("appToken").notNull(),
+	priority: integer("priority").notNull().default(5),
+	decoration: boolean("decoration"),
+});
+
+export const ntfy = pgTable("ntfy", {
+	ntfyId: text("ntfyId")
+		.notNull()
+		.primaryKey()
+		.$defaultFn(() => nanoid()),
+	serverUrl: text("serverUrl").notNull(),
+	topic: text("topic").notNull(),
+	accessToken: text("accessToken"),
+	priority: integer("priority").notNull().default(3),
+});
+
+export const mattermost = pgTable("mattermost", {
+	mattermostId: text("mattermostId")
+		.notNull()
+		.primaryKey()
+		.$defaultFn(() => nanoid()),
+	webhookUrl: text("webhookUrl").notNull(),
+	channel: text("channel"),
+	username: text("username"),
+});
+
+export const custom = pgTable("custom", {
+	customId: text("customId")
+		.notNull()
+		.primaryKey()
+		.$defaultFn(() => nanoid()),
+	endpoint: text("endpoint").notNull(),
+	headers: jsonb("headers").$type<Record<string, string>>(),
+});
+
+export const lark = pgTable("lark", {
+	larkId: text("larkId")
+		.notNull()
+		.primaryKey()
+		.$defaultFn(() => nanoid()),
+	webhookUrl: text("webhookUrl").notNull(),
+});
+
+export const pushover = pgTable("pushover", {
+	pushoverId: text("pushoverId")
+		.notNull()
+		.primaryKey()
+		.$defaultFn(() => nanoid()),
+	userKey: text("userKey").notNull(),
+	apiToken: text("apiToken").notNull(),
+	priority: integer("priority").notNull().default(0),
+	retry: integer("retry"),
+	expire: integer("expire"),
+});
+
+export const teams = pgTable("teams", {
+	teamsId: text("teamsId")
+		.notNull()
+		.primaryKey()
+		.$defaultFn(() => nanoid()),
+	webhookUrl: text("webhookUrl").notNull(),
 });
 
 export const notificationsRelations = relations(notifications, ({ one }) => ({
@@ -100,9 +223,41 @@ export const notificationsRelations = relations(notifications, ({ one }) => ({
 		fields: [notifications.emailId],
 		references: [email.emailId],
 	}),
-	admin: one(admins, {
-		fields: [notifications.adminId],
-		references: [admins.adminId],
+	resend: one(resend, {
+		fields: [notifications.resendId],
+		references: [resend.resendId],
+	}),
+	gotify: one(gotify, {
+		fields: [notifications.gotifyId],
+		references: [gotify.gotifyId],
+	}),
+	ntfy: one(ntfy, {
+		fields: [notifications.ntfyId],
+		references: [ntfy.ntfyId],
+	}),
+	mattermost: one(mattermost, {
+		fields: [notifications.mattermostId],
+		references: [mattermost.mattermostId],
+	}),
+	custom: one(custom, {
+		fields: [notifications.customId],
+		references: [custom.customId],
+	}),
+	lark: one(lark, {
+		fields: [notifications.larkId],
+		references: [lark.larkId],
+	}),
+	pushover: one(pushover, {
+		fields: [notifications.pushoverId],
+		references: [pushover.pushoverId],
+	}),
+	teams: one(teams, {
+		fields: [notifications.teamsId],
+		references: [teams.teamsId],
+	}),
+	organization: one(organization, {
+		fields: [notifications.organizationId],
+		references: [organization.id],
 	}),
 }));
 
@@ -112,10 +267,13 @@ export const apiCreateSlack = notificationsSchema
 	.pick({
 		appBuildError: true,
 		databaseBackup: true,
+		dokployBackup: true,
+		volumeBackup: true,
 		dokployRestart: true,
 		name: true,
 		appDeploy: true,
 		dockerCleanup: true,
+		serverThreshold: true,
 	})
 	.extend({
 		webhookUrl: z.string().min(1),
@@ -126,7 +284,7 @@ export const apiCreateSlack = notificationsSchema
 export const apiUpdateSlack = apiCreateSlack.partial().extend({
 	notificationId: z.string().min(1),
 	slackId: z.string(),
-	adminId: z.string().optional(),
+	organizationId: z.string().optional(),
 });
 
 export const apiTestSlackConnection = apiCreateSlack.pick({
@@ -138,60 +296,76 @@ export const apiCreateTelegram = notificationsSchema
 	.pick({
 		appBuildError: true,
 		databaseBackup: true,
+		dokployBackup: true,
+		volumeBackup: true,
 		dokployRestart: true,
 		name: true,
 		appDeploy: true,
 		dockerCleanup: true,
+		serverThreshold: true,
 	})
 	.extend({
 		botToken: z.string().min(1),
 		chatId: z.string().min(1),
+		messageThreadId: z.string(),
 	})
 	.required();
 
 export const apiUpdateTelegram = apiCreateTelegram.partial().extend({
 	notificationId: z.string().min(1),
 	telegramId: z.string().min(1),
-	adminId: z.string().optional(),
+	organizationId: z.string().optional(),
 });
 
 export const apiTestTelegramConnection = apiCreateTelegram.pick({
 	botToken: true,
 	chatId: true,
+	messageThreadId: true,
 });
 
 export const apiCreateDiscord = notificationsSchema
 	.pick({
 		appBuildError: true,
 		databaseBackup: true,
+		dokployBackup: true,
+		volumeBackup: true,
 		dokployRestart: true,
 		name: true,
 		appDeploy: true,
 		dockerCleanup: true,
+		serverThreshold: true,
 	})
 	.extend({
 		webhookUrl: z.string().min(1),
+		decoration: z.boolean(),
 	})
 	.required();
 
 export const apiUpdateDiscord = apiCreateDiscord.partial().extend({
 	notificationId: z.string().min(1),
 	discordId: z.string().min(1),
-	adminId: z.string().optional(),
+	organizationId: z.string().optional(),
 });
 
-export const apiTestDiscordConnection = apiCreateDiscord.pick({
-	webhookUrl: true,
-});
+export const apiTestDiscordConnection = apiCreateDiscord
+	.pick({
+		webhookUrl: true,
+	})
+	.extend({
+		decoration: z.boolean().optional(),
+	});
 
 export const apiCreateEmail = notificationsSchema
 	.pick({
 		appBuildError: true,
 		databaseBackup: true,
+		dokployBackup: true,
+		volumeBackup: true,
 		dokployRestart: true,
 		name: true,
 		appDeploy: true,
 		dockerCleanup: true,
+		serverThreshold: true,
 	})
 	.extend({
 		smtpServer: z.string().min(1),
@@ -206,7 +380,7 @@ export const apiCreateEmail = notificationsSchema
 export const apiUpdateEmail = apiCreateEmail.partial().extend({
 	notificationId: z.string().min(1),
 	emailId: z.string().min(1),
-	adminId: z.string().optional(),
+	organizationId: z.string().optional(),
 });
 
 export const apiTestEmailConnection = apiCreateEmail.pick({
@@ -218,11 +392,303 @@ export const apiTestEmailConnection = apiCreateEmail.pick({
 	fromAddress: true,
 });
 
-export const apiFindOneNotification = notificationsSchema
+export const apiCreateResend = notificationsSchema
 	.pick({
-		notificationId: true,
+		appBuildError: true,
+		databaseBackup: true,
+		dokployBackup: true,
+		volumeBackup: true,
+		dokployRestart: true,
+		name: true,
+		appDeploy: true,
+		dockerCleanup: true,
+		serverThreshold: true,
+	})
+	.extend({
+		apiKey: z.string().min(1),
+		fromAddress: z.string().min(1),
+		toAddresses: z.array(z.string()).min(1),
 	})
 	.required();
+
+export const apiUpdateResend = apiCreateResend.partial().extend({
+	notificationId: z.string().min(1),
+	resendId: z.string().min(1),
+	organizationId: z.string().optional(),
+});
+
+export const apiTestResendConnection = apiCreateResend.pick({
+	apiKey: true,
+	fromAddress: true,
+	toAddresses: true,
+});
+
+export const apiCreateGotify = notificationsSchema
+	.pick({
+		appBuildError: true,
+		databaseBackup: true,
+		dokployBackup: true,
+		volumeBackup: true,
+		dokployRestart: true,
+		name: true,
+		appDeploy: true,
+		dockerCleanup: true,
+		serverThreshold: true,
+	})
+	.extend({
+		serverUrl: z.string().min(1),
+		appToken: z.string().min(1),
+		priority: z.number().min(1),
+		decoration: z.boolean(),
+	})
+	.required();
+
+export const apiUpdateGotify = apiCreateGotify.partial().extend({
+	notificationId: z.string().min(1),
+	gotifyId: z.string().min(1),
+	organizationId: z.string().optional(),
+});
+
+export const apiTestGotifyConnection = apiCreateGotify
+	.pick({
+		serverUrl: true,
+		appToken: true,
+		priority: true,
+	})
+	.extend({
+		decoration: z.boolean().optional(),
+	});
+
+export const apiCreateNtfy = notificationsSchema
+	.pick({
+		appBuildError: true,
+		databaseBackup: true,
+		dokployBackup: true,
+		volumeBackup: true,
+		dokployRestart: true,
+		name: true,
+		appDeploy: true,
+		dockerCleanup: true,
+		serverThreshold: true,
+	})
+	.extend({
+		serverUrl: z.string().min(1),
+		topic: z.string().min(1),
+		accessToken: z.string().optional(),
+		priority: z.number().min(1),
+	})
+	.required();
+
+export const apiUpdateNtfy = apiCreateNtfy.partial().extend({
+	notificationId: z.string().min(1),
+	ntfyId: z.string().min(1),
+	organizationId: z.string().optional(),
+});
+
+export const apiTestNtfyConnection = apiCreateNtfy.pick({
+	serverUrl: true,
+	topic: true,
+	accessToken: true,
+	priority: true,
+});
+
+export const apiCreateMattermost = notificationsSchema
+	.pick({
+		appBuildError: true,
+		databaseBackup: true,
+		dokployBackup: true,
+		volumeBackup: true,
+		dokployRestart: true,
+		name: true,
+		appDeploy: true,
+		dockerCleanup: true,
+		serverThreshold: true,
+	})
+	.extend({
+		webhookUrl: z.string().url(),
+		channel: z.string().optional(),
+		username: z.string().optional(),
+	})
+	.required({
+		name: true,
+		webhookUrl: true,
+		appBuildError: true,
+		databaseBackup: true,
+		dokployBackup: true,
+		volumeBackup: true,
+		dokployRestart: true,
+		appDeploy: true,
+		dockerCleanup: true,
+		serverThreshold: true,
+	});
+
+export const apiUpdateMattermost = apiCreateMattermost.partial().extend({
+	notificationId: z.string().min(1),
+	mattermostId: z.string().min(1),
+	organizationId: z.string().optional(),
+});
+
+export const apiTestMattermostConnection = apiCreateMattermost
+	.pick({
+		webhookUrl: true,
+		channel: true,
+		username: true,
+	})
+	.extend({
+		channel: z.string().optional(),
+		username: z.string().optional(),
+	});
+
+export const apiFindOneNotification = z.object({
+	notificationId: z.string().min(1),
+});
+
+export const apiCreateCustom = notificationsSchema
+	.pick({
+		appBuildError: true,
+		databaseBackup: true,
+		dokployBackup: true,
+		volumeBackup: true,
+		dokployRestart: true,
+		name: true,
+		appDeploy: true,
+		dockerCleanup: true,
+		serverThreshold: true,
+	})
+	.extend({
+		endpoint: z.string().min(1),
+		headers: z.record(z.string(), z.string()).optional(),
+	});
+
+export const apiUpdateCustom = apiCreateCustom.partial().extend({
+	notificationId: z.string().min(1),
+	customId: z.string().min(1),
+	organizationId: z.string().optional(),
+});
+
+export const apiTestCustomConnection = z.object({
+	endpoint: z.string().min(1),
+	headers: z.record(z.string(), z.string()).optional(),
+});
+
+export const apiCreateLark = notificationsSchema
+	.pick({
+		appBuildError: true,
+		databaseBackup: true,
+		dokployBackup: true,
+		volumeBackup: true,
+		dokployRestart: true,
+		name: true,
+		appDeploy: true,
+		dockerCleanup: true,
+		serverThreshold: true,
+	})
+	.extend({
+		webhookUrl: z.string().min(1),
+	})
+	.required();
+
+export const apiUpdateLark = apiCreateLark.partial().extend({
+	notificationId: z.string().min(1),
+	larkId: z.string().min(1),
+	organizationId: z.string().optional(),
+});
+
+export const apiTestLarkConnection = apiCreateLark.pick({
+	webhookUrl: true,
+});
+
+export const apiCreateTeams = notificationsSchema
+	.pick({
+		appBuildError: true,
+		databaseBackup: true,
+		dokployBackup: true,
+		volumeBackup: true,
+		dokployRestart: true,
+		name: true,
+		appDeploy: true,
+		dockerCleanup: true,
+		serverThreshold: true,
+	})
+	.extend({
+		webhookUrl: z.string().min(1),
+	})
+	.required();
+
+export const apiUpdateTeams = apiCreateTeams.partial().extend({
+	notificationId: z.string().min(1),
+	teamsId: z.string().min(1),
+	organizationId: z.string().optional(),
+});
+
+export const apiTestTeamsConnection = apiCreateTeams.pick({
+	webhookUrl: true,
+});
+
+export const apiCreatePushover = notificationsSchema
+	.pick({
+		appBuildError: true,
+		databaseBackup: true,
+		dokployBackup: true,
+		volumeBackup: true,
+		dokployRestart: true,
+		name: true,
+		appDeploy: true,
+		dockerCleanup: true,
+		serverThreshold: true,
+	})
+	.extend({
+		userKey: z.string().min(1),
+		apiToken: z.string().min(1),
+		priority: z.number().min(-2).max(2).default(0),
+		retry: z.number().min(30).nullish(),
+		expire: z.number().min(1).max(10800).nullish(),
+	})
+	.refine(
+		(data) =>
+			data.priority !== 2 || (data.retry != null && data.expire != null),
+		{
+			message: "Retry and expire are required for emergency priority (2)",
+			path: ["retry"],
+		},
+	);
+
+export const apiUpdatePushover = z.object({
+	notificationId: z.string().min(1),
+	pushoverId: z.string().min(1),
+	organizationId: z.string().optional(),
+	userKey: z.string().min(1).optional(),
+	apiToken: z.string().min(1).optional(),
+	priority: z.number().min(-2).max(2).optional(),
+	retry: z.number().min(30).nullish(),
+	expire: z.number().min(1).max(10800).nullish(),
+	appBuildError: z.boolean().optional(),
+	databaseBackup: z.boolean().optional(),
+	dokployBackup: z.boolean().optional(),
+	volumeBackup: z.boolean().optional(),
+	dokployRestart: z.boolean().optional(),
+	name: z.string().optional(),
+	appDeploy: z.boolean().optional(),
+	dockerCleanup: z.boolean().optional(),
+	serverThreshold: z.boolean().optional(),
+});
+
+export const apiTestPushoverConnection = z
+	.object({
+		userKey: z.string().min(1),
+		apiToken: z.string().min(1),
+		priority: z.number().min(-2).max(2),
+		retry: z.number().min(30).nullish(),
+		expire: z.number().min(1).max(10800).nullish(),
+	})
+	.refine(
+		(data) =>
+			data.priority !== 2 || (data.retry != null && data.expire != null),
+		{
+			message: "Retry and expire are required for emergency priority (2)",
+			path: ["retry"],
+		},
+	);
 
 export const apiSendTest = notificationsSchema
 	.extend({
@@ -236,5 +702,13 @@ export const apiSendTest = notificationsSchema
 		username: z.string(),
 		password: z.string(),
 		toAddresses: z.array(z.string()),
+		apiKey: z.string(),
+		serverUrl: z.string(),
+		topic: z.string(),
+		appToken: z.string(),
+		accessToken: z.string().optional(),
+		priority: z.number(),
+		endpoint: z.string(),
+		headers: z.string(),
 	})
 	.partial();

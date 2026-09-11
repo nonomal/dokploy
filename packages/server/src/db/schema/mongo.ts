@@ -1,14 +1,48 @@
 import { relations } from "drizzle-orm";
-import { integer, pgTable, text } from "drizzle-orm/pg-core";
+import {
+	bigint,
+	boolean,
+	integer,
+	json,
+	pgTable,
+	text,
+} from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { nanoid } from "nanoid";
 import { z } from "zod";
 import { backups } from "./backups";
+import { environments } from "./environment";
 import { mounts } from "./mount";
-import { projects } from "./project";
 import { server } from "./server";
-import { applicationStatus } from "./shared";
-import { generateAppName } from "./utils";
+import {
+	applicationStatus,
+	type EndpointSpecSwarm,
+	EndpointSpecSwarmSchema,
+	type HealthCheckSwarm,
+	HealthCheckSwarmSchema,
+	type LabelsSwarm,
+	LabelsSwarmSchema,
+	type NetworkSwarm,
+	NetworkSwarmSchema,
+	type PlacementSwarm,
+	PlacementSwarmSchema,
+	type RestartPolicySwarm,
+	RestartPolicySwarmSchema,
+	type ServiceModeSwarm,
+	ServiceModeSwarmSchema,
+	type UlimitsSwarm,
+	UlimitsSwarmSchema,
+	type UpdateConfigSwarm,
+	UpdateConfigSwarmSchema,
+} from "./shared";
+import {
+	APP_NAME_MESSAGE,
+	APP_NAME_REGEX,
+	DATABASE_PASSWORD_MESSAGE,
+	DATABASE_PASSWORD_REGEX,
+	encryptedText,
+	generateAppName,
+} from "./utils";
 
 export const mongo = pgTable("mongo", {
 	mongoId: text("mongoId")
@@ -23,32 +57,51 @@ export const mongo = pgTable("mongo", {
 	description: text("description"),
 	databaseUser: text("databaseUser").notNull(),
 	databasePassword: text("databasePassword").notNull(),
-	dockerImage: text("dockerImage").notNull(),
+	dockerImage: text("dockerImage").notNull().default("mongo:8"),
 	command: text("command"),
-	env: text("env"),
-	memoryReservation: integer("memoryReservation"),
-	memoryLimit: integer("memoryLimit"),
-	cpuReservation: integer("cpuReservation"),
-	cpuLimit: integer("cpuLimit"),
+	args: text("args").array(),
+	env: encryptedText("env"),
+	memoryReservation: text("memoryReservation"),
+	memoryLimit: text("memoryLimit"),
+	cpuReservation: text("cpuReservation"),
+	cpuLimit: text("cpuLimit"),
 	externalPort: integer("externalPort"),
 	applicationStatus: applicationStatus("applicationStatus")
 		.notNull()
 		.default("idle"),
+	healthCheckSwarm: json("healthCheckSwarm").$type<HealthCheckSwarm>(),
+	restartPolicySwarm: json("restartPolicySwarm").$type<RestartPolicySwarm>(),
+	placementSwarm: json("placementSwarm").$type<PlacementSwarm>(),
+	updateConfigSwarm: json("updateConfigSwarm").$type<UpdateConfigSwarm>(),
+	rollbackConfigSwarm: json("rollbackConfigSwarm").$type<UpdateConfigSwarm>(),
+	modeSwarm: json("modeSwarm").$type<ServiceModeSwarm>(),
+	labelsSwarm: json("labelsSwarm").$type<LabelsSwarm>(),
+	networkSwarm: json("networkSwarm").$type<NetworkSwarm[]>(),
+	stopGracePeriodSwarm: bigint("stopGracePeriodSwarm", { mode: "number" }),
+	endpointSpecSwarm: json("endpointSpecSwarm").$type<EndpointSpecSwarm>(),
+	ulimitsSwarm: json("ulimitsSwarm").$type<UlimitsSwarm>(),
+	replicas: integer("replicas").default(1).notNull(),
 	createdAt: text("createdAt")
 		.notNull()
 		.$defaultFn(() => new Date().toISOString()),
-	projectId: text("projectId")
+
+	environmentId: text("environmentId")
 		.notNull()
-		.references(() => projects.projectId, { onDelete: "cascade" }),
+		.references(() => environments.environmentId, { onDelete: "cascade" }),
 	serverId: text("serverId").references(() => server.serverId, {
 		onDelete: "cascade",
 	}),
+	replicaSets: boolean("replicaSets").default(false),
+	networkIds: text("networkIds").array().default([]),
+	detachDokployNetwork: boolean("detachDokployNetwork")
+		.notNull()
+		.default(false),
 });
 
 export const mongoRelations = relations(mongo, ({ one, many }) => ({
-	project: one(projects, {
-		fields: [mongo.projectId],
-		references: [projects.projectId],
+	environment: one(environments, {
+		fields: [mongo.environmentId],
+		references: [environments.environmentId],
 	}),
 	backups: many(backups),
 	mounts: many(mounts),
@@ -59,44 +112,63 @@ export const mongoRelations = relations(mongo, ({ one, many }) => ({
 }));
 
 const createSchema = createInsertSchema(mongo, {
-	appName: z.string().min(1),
+	appName: z
+		.string()
+		.min(1)
+		.max(63)
+		.regex(APP_NAME_REGEX, APP_NAME_MESSAGE)
+		.optional(),
 	createdAt: z.string(),
 	mongoId: z.string(),
 	name: z.string().min(1),
-	databasePassword: z.string(),
+	databasePassword: z.string().regex(DATABASE_PASSWORD_REGEX, {
+		message: DATABASE_PASSWORD_MESSAGE,
+	}),
 	databaseUser: z.string().min(1),
 	dockerImage: z.string().default("mongo:15"),
 	command: z.string().optional(),
+	args: z.array(z.string()).optional(),
 	env: z.string().optional(),
-	memoryReservation: z.number().optional(),
-	memoryLimit: z.number().optional(),
-	cpuReservation: z.number().optional(),
-	cpuLimit: z.number().optional(),
-	projectId: z.string(),
+	memoryReservation: z.string().optional(),
+	memoryLimit: z.string().optional(),
+	cpuReservation: z.string().optional(),
+	cpuLimit: z.string().optional(),
+	environmentId: z.string(),
 	applicationStatus: z.enum(["idle", "running", "done", "error"]),
 	externalPort: z.number(),
 	description: z.string().optional(),
 	serverId: z.string().optional(),
+	replicaSets: z.boolean().default(false),
+	healthCheckSwarm: HealthCheckSwarmSchema.nullable(),
+	restartPolicySwarm: RestartPolicySwarmSchema.nullable(),
+	placementSwarm: PlacementSwarmSchema.nullable(),
+	updateConfigSwarm: UpdateConfigSwarmSchema.nullable(),
+	rollbackConfigSwarm: UpdateConfigSwarmSchema.nullable(),
+	modeSwarm: ServiceModeSwarmSchema.nullable(),
+	labelsSwarm: LabelsSwarmSchema.nullable(),
+	networkSwarm: NetworkSwarmSchema.nullable(),
+	stopGracePeriodSwarm: z.number().nullable(),
+	endpointSpecSwarm: EndpointSpecSwarmSchema.nullable(),
+	ulimitsSwarm: UlimitsSwarmSchema.nullable(),
+	networkIds: z.array(z.string()).optional(),
+	detachDokployNetwork: z.boolean().optional(),
 });
 
-export const apiCreateMongo = createSchema
-	.pick({
-		name: true,
-		appName: true,
-		dockerImage: true,
-		projectId: true,
-		description: true,
-		databaseUser: true,
-		databasePassword: true,
-		serverId: true,
-	})
-	.required();
+export const apiCreateMongo = createSchema.pick({
+	name: true,
+	appName: true,
+	dockerImage: true,
+	environmentId: true,
+	description: true,
+	databaseUser: true,
+	databasePassword: true,
+	serverId: true,
+	replicaSets: true,
+});
 
-export const apiFindOneMongo = createSchema
-	.pick({
-		mongoId: true,
-	})
-	.required();
+export const apiFindOneMongo = z.object({
+	mongoId: z.string().min(1),
+});
 
 export const apiChangeMongoStatus = createSchema
 	.pick({
@@ -129,6 +201,8 @@ export const apiUpdateMongo = createSchema
 	.partial()
 	.extend({
 		mongoId: z.string().min(1),
+		dockerImage: z.string().optional(),
+		replicaSets: z.boolean().optional(),
 	})
 	.omit({ serverId: true });
 
@@ -136,5 +210,11 @@ export const apiResetMongo = createSchema
 	.pick({
 		mongoId: true,
 		appName: true,
+	})
+	.required();
+
+export const apiRebuildMongo = createSchema
+	.pick({
+		mongoId: true,
 	})
 	.required();

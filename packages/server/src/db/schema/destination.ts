@@ -1,9 +1,13 @@
 import { relations } from "drizzle-orm";
-import { pgTable, text } from "drizzle-orm/pg-core";
+import { pgTable, text, timestamp } from "drizzle-orm/pg-core";
 import { createInsertSchema } from "drizzle-zod";
 import { nanoid } from "nanoid";
 import { z } from "zod";
-import { admins } from "./admin";
+import {
+	ADDITIONAL_FLAG_ERROR,
+	ADDITIONAL_FLAG_REGEX,
+} from "../validations/destination";
+import { organization } from "./account";
 import { backups } from "./backups";
 
 export const destinations = pgTable("destination", {
@@ -12,24 +16,26 @@ export const destinations = pgTable("destination", {
 		.primaryKey()
 		.$defaultFn(() => nanoid()),
 	name: text("name").notNull(),
+	provider: text("provider"),
 	accessKey: text("accessKey").notNull(),
 	secretAccessKey: text("secretAccessKey").notNull(),
 	bucket: text("bucket").notNull(),
 	region: text("region").notNull(),
-	//   maybe it can be null
 	endpoint: text("endpoint").notNull(),
-	adminId: text("adminId")
+	additionalFlags: text("additionalFlags").array(),
+	organizationId: text("organizationId")
 		.notNull()
-		.references(() => admins.adminId, { onDelete: "cascade" }),
+		.references(() => organization.id, { onDelete: "cascade" }),
+	createdAt: timestamp("createdAt").notNull().defaultNow(),
 });
 
 export const destinationsRelations = relations(
 	destinations,
 	({ many, one }) => ({
 		backups: many(backups),
-		admin: one(admins, {
-			fields: [destinations.adminId],
-			references: [admins.adminId],
+		organization: one(organization, {
+			fields: [destinations.organizationId],
+			references: [organization.id],
 		}),
 	}),
 );
@@ -37,32 +43,36 @@ export const destinationsRelations = relations(
 const createSchema = createInsertSchema(destinations, {
 	destinationId: z.string(),
 	name: z.string().min(1),
+	provider: z.string(),
 	accessKey: z.string(),
 	bucket: z.string(),
 	endpoint: z.string(),
 	secretAccessKey: z.string(),
 	region: z.string(),
+	additionalFlags: z
+		.array(z.string().regex(ADDITIONAL_FLAG_REGEX, ADDITIONAL_FLAG_ERROR))
+		.default([]),
 });
 
 export const apiCreateDestination = createSchema
 	.pick({
 		name: true,
+		provider: true,
 		accessKey: true,
 		bucket: true,
 		region: true,
 		endpoint: true,
 		secretAccessKey: true,
+		additionalFlags: true,
 	})
 	.required()
 	.extend({
 		serverId: z.string().optional(),
 	});
 
-export const apiFindOneDestination = createSchema
-	.pick({
-		destinationId: true,
-	})
-	.required();
+export const apiFindOneDestination = z.object({
+	destinationId: z.string().min(1),
+});
 
 export const apiRemoveDestination = createSchema
 	.pick({
@@ -79,6 +89,8 @@ export const apiUpdateDestination = createSchema
 		endpoint: true,
 		secretAccessKey: true,
 		destinationId: true,
+		provider: true,
+		additionalFlags: true,
 	})
 	.required()
 	.extend({

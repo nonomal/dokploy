@@ -1,3 +1,8 @@
+import { standardSchemaResolver as zodResolver } from "@hookform/resolvers/standard-schema";
+import { useEffect } from "react";
+import { useForm } from "react-hook-form";
+import { toast } from "sonner";
+import { z } from "zod";
 import { Button } from "@/components/ui/button";
 import {
 	Form,
@@ -9,11 +14,6 @@ import {
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { api } from "@/utils/api";
-import { zodResolver } from "@hookform/resolvers/zod";
-import { useEffect } from "react";
-import { useForm } from "react-hook-form";
-import { toast } from "sonner";
-import { z } from "zod";
 
 const DockerProviderSchema = z.object({
 	dockerImage: z.string().min(1, {
@@ -21,6 +21,7 @@ const DockerProviderSchema = z.object({
 	}),
 	username: z.string().optional(),
 	password: z.string().optional(),
+	registryURL: z.string().optional(),
 });
 
 type DockerProvider = z.infer<typeof DockerProviderSchema>;
@@ -33,12 +34,12 @@ export const SaveDockerProvider = ({ applicationId }: Props) => {
 	const { data, refetch } = api.application.one.useQuery({ applicationId });
 
 	const { mutateAsync } = api.application.saveDockerProvider.useMutation();
-
 	const form = useForm<DockerProvider>({
 		defaultValues: {
 			dockerImage: "",
 			password: "",
 			username: "",
+			registryURL: "",
 		},
 		resolver: zodResolver(DockerProviderSchema),
 	});
@@ -49,9 +50,10 @@ export const SaveDockerProvider = ({ applicationId }: Props) => {
 				dockerImage: data.dockerImage || "",
 				password: data.password || "",
 				username: data.username || "",
+				registryURL: data.registryUrl || "",
 			});
 		}
-	}, [form.reset, data, form]);
+	}, [form.reset, data?.applicationId, form]);
 
 	const onSubmit = async (values: DockerProvider) => {
 		await mutateAsync({
@@ -59,13 +61,14 @@ export const SaveDockerProvider = ({ applicationId }: Props) => {
 			password: values.password || null,
 			applicationId,
 			username: values.username || null,
+			registryUrl: values.registryURL || null,
 		})
 			.then(async () => {
 				toast.success("Docker Provider Saved");
 				await refetch();
 			})
 			.catch(() => {
-				toast.error("Error to save the Docker provider");
+				toast.error("Error saving the Docker provider");
 			});
 	};
 
@@ -76,7 +79,7 @@ export const SaveDockerProvider = ({ applicationId }: Props) => {
 				className="flex flex-col gap-4"
 			>
 				<div className="grid md:grid-cols-2 gap-4 ">
-					<div className="md:col-span-2 space-y-4">
+					<div className="space-y-4">
 						<FormField
 							control={form.control}
 							name="dockerImage"
@@ -91,6 +94,19 @@ export const SaveDockerProvider = ({ applicationId }: Props) => {
 							)}
 						/>
 					</div>
+					<FormField
+						control={form.control}
+						name="registryURL"
+						render={({ field }) => (
+							<FormItem>
+								<FormLabel>Registry URL</FormLabel>
+								<FormControl>
+									<Input placeholder="Registry URL" {...field} />
+								</FormControl>
+								<FormMessage />
+							</FormItem>
+						)}
+					/>
 					<div className="space-y-4">
 						<FormField
 							control={form.control}
@@ -99,7 +115,11 @@ export const SaveDockerProvider = ({ applicationId }: Props) => {
 								<FormItem>
 									<FormLabel>Username</FormLabel>
 									<FormControl>
-										<Input placeholder="username" {...field} />
+										<Input
+											placeholder="Username"
+											autoComplete="username"
+											{...field}
+										/>
 									</FormControl>
 									<FormMessage />
 								</FormItem>
@@ -114,7 +134,12 @@ export const SaveDockerProvider = ({ applicationId }: Props) => {
 								<FormItem>
 									<FormLabel>Password</FormLabel>
 									<FormControl>
-										<Input placeholder="Password" {...field} type="password" />
+										<Input
+											placeholder="Password"
+											autoComplete="one-time-code"
+											{...field}
+											type="password"
+										/>
 									</FormControl>
 									<FormMessage />
 								</FormItem>

@@ -1,12 +1,11 @@
-import { ShowGitProviders } from "@/components/dashboard/settings/git/show-git-providers";
-import { DashboardLayout } from "@/components/layouts/dashboard-layout";
-import { SettingsLayout } from "@/components/layouts/settings-layout";
-import { appRouter } from "@/server/api/root";
 import { validateRequest } from "@dokploy/server";
 import { createServerSideHelpers } from "@trpc/react-query/server";
 import type { GetServerSidePropsContext } from "next";
-import React, { type ReactElement } from "react";
+import type { ReactElement } from "react";
 import superjson from "superjson";
+import { ShowGitProviders } from "@/components/dashboard/settings/git/show-git-providers";
+import { DashboardLayout } from "@/components/layouts/dashboard-layout";
+import { appRouter } from "@/server/api/root";
 
 const Page = () => {
 	return (
@@ -19,20 +18,16 @@ const Page = () => {
 export default Page;
 
 Page.getLayout = (page: ReactElement) => {
-	return (
-		<DashboardLayout tab={"settings"}>
-			<SettingsLayout>{page}</SettingsLayout>
-		</DashboardLayout>
-	);
+	return <DashboardLayout metaName="Git Providers">{page}</DashboardLayout>;
 };
 export async function getServerSideProps(
 	ctx: GetServerSidePropsContext<{ serviceId: string }>,
 ) {
-	const { user, session } = await validateRequest(ctx.req, ctx.res);
+	const { user, session } = await validateRequest(ctx.req);
 	if (!user) {
 		return {
 			redirect: {
-				permanent: true,
+				permanent: false,
 				destination: "/",
 			},
 		};
@@ -44,37 +39,31 @@ export async function getServerSideProps(
 			req: req as any,
 			res: res as any,
 			db: null as any,
-			session: session,
-			user: user,
+			session: session as any,
+			user: user as any,
 		},
 		transformer: superjson,
 	});
-
+	await helpers.user.get.prefetch();
 	try {
 		await helpers.project.all.prefetch();
 		await helpers.settings.isCloud.prefetch();
-		const auth = await helpers.auth.get.fetch();
+		const userPermissions = await helpers.user.getPermissions.fetch();
 
-		if (auth.rol === "user") {
-			const user = await helpers.user.byAuthId.fetch({
-				authId: auth.id,
-			});
-
-			if (!user.canAccessToGitProviders) {
-				return {
-					redirect: {
-						permanent: true,
-						destination: "/",
-					},
-				};
-			}
+		if (!userPermissions?.gitProviders.read) {
+			return {
+				redirect: {
+					permanent: false,
+					destination: "/",
+				},
+			};
 		}
 		return {
 			props: {
 				trpcState: helpers.dehydrate(),
 			},
 		};
-	} catch (error) {
+	} catch {
 		return {
 			props: {},
 		};

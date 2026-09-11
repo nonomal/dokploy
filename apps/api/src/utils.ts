@@ -1,45 +1,15 @@
 import {
 	deployApplication,
 	deployCompose,
-	deployRemoteApplication,
-	deployRemoteCompose,
+	deployPreviewApplication,
 	rebuildApplication,
 	rebuildCompose,
-	rebuildRemoteApplication,
-	rebuildRemoteCompose,
+	rebuildPreviewApplication,
 	updateApplicationStatus,
 	updateCompose,
-} from "@dokploy/server/dist";
-import type { DeployJob } from "./schema";
-import type { LemonSqueezyLicenseResponse } from "./types";
-
-// const LEMON_SQUEEZY_API_KEY = process.env.LEMON_SQUEEZY_API_KEY;
-// const LEMON_SQUEEZY_STORE_ID = process.env.LEMON_SQUEEZY_STORE_ID;
-// export const validateLemonSqueezyLicense = async (
-// 	licenseKey: string,
-// ): Promise<LemonSqueezyLicenseResponse> => {
-// 	try {
-// 		const response = await fetch(
-// 			"https://api.lemonsqueezy.com/v1/licenses/validate",
-// 			{
-// 				method: "POST",
-// 				headers: {
-// 					"Content-Type": "application/json",
-// 					"x-api-key": LEMON_SQUEEZY_API_KEY as string,
-// 				},
-// 				body: JSON.stringify({
-// 					license_key: licenseKey,
-// 					store_id: LEMON_SQUEEZY_STORE_ID as string,
-// 				}),
-// 			},
-// 		);
-
-// 		return response.json();
-// 	} catch (error) {
-// 		console.error("Error validating license:", error);
-// 		return { valid: false, error: "Error validating license" };
-// 	}
-// };
+	updatePreviewDeployment,
+} from "@dokploy/server";
+import type { DeployJob } from "./schema.js";
 
 export const deploy = async (job: DeployJob) => {
 	try {
@@ -47,16 +17,16 @@ export const deploy = async (job: DeployJob) => {
 			await updateApplicationStatus(job.applicationId, "running");
 			if (job.server) {
 				if (job.type === "redeploy") {
-					await rebuildRemoteApplication({
+					await rebuildApplication({
 						applicationId: job.applicationId,
-						titleLog: job.titleLog,
-						descriptionLog: job.descriptionLog,
+						titleLog: job.titleLog || "Rebuild deployment",
+						descriptionLog: job.descriptionLog || "",
 					});
 				} else if (job.type === "deploy") {
-					await deployRemoteApplication({
+					await deployApplication({
 						applicationId: job.applicationId,
-						titleLog: job.titleLog,
-						descriptionLog: job.descriptionLog,
+						titleLog: job.titleLog || "Manual deployment",
+						descriptionLog: job.descriptionLog || "",
 					});
 				}
 			}
@@ -67,29 +37,55 @@ export const deploy = async (job: DeployJob) => {
 
 			if (job.server) {
 				if (job.type === "redeploy") {
-					await rebuildRemoteCompose({
+					await rebuildCompose({
 						composeId: job.composeId,
-						titleLog: job.titleLog,
-						descriptionLog: job.descriptionLog,
+						titleLog: job.titleLog || "Rebuild deployment",
+						descriptionLog: job.descriptionLog || "",
 					});
 				} else if (job.type === "deploy") {
-					await deployRemoteCompose({
+					await deployCompose({
 						composeId: job.composeId,
-						titleLog: job.titleLog,
-						descriptionLog: job.descriptionLog,
+						titleLog: job.titleLog || "Manual deployment",
+						descriptionLog: job.descriptionLog || "",
+					});
+				}
+			}
+		} else if (job.applicationType === "application-preview") {
+			await updatePreviewDeployment(job.previewDeploymentId, {
+				previewStatus: "running",
+			});
+			if (job.server) {
+				if (job.type === "redeploy") {
+					await rebuildPreviewApplication({
+						applicationId: job.applicationId,
+						titleLog: job.titleLog || "Rebuild Preview Deployment",
+						descriptionLog: job.descriptionLog || "",
+						previewDeploymentId: job.previewDeploymentId,
+					});
+				} else if (job.type === "deploy") {
+					await deployPreviewApplication({
+						applicationId: job.applicationId,
+						titleLog: job.titleLog || "Preview Deployment",
+						descriptionLog: job.descriptionLog || "",
+						previewDeploymentId: job.previewDeploymentId,
 					});
 				}
 			}
 		}
-	} catch (error) {
-		console.log(error);
+	} catch (e) {
 		if (job.applicationType === "application") {
 			await updateApplicationStatus(job.applicationId, "error");
 		} else if (job.applicationType === "compose") {
 			await updateCompose(job.composeId, {
 				composeStatus: "error",
 			});
+		} else if (job.applicationType === "application-preview") {
+			await updatePreviewDeployment(job.previewDeploymentId, {
+				previewStatus: "error",
+			});
 		}
+
+		throw e;
 	}
 
 	return true;

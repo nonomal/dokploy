@@ -1,3 +1,9 @@
+import { standardSchemaResolver as zodResolver } from "@hookform/resolvers/standard-schema";
+import { Folder, HelpCircle } from "lucide-react";
+import { useState } from "react";
+import { useForm } from "react-hook-form";
+import { toast } from "sonner";
+import { z } from "zod";
 import { AlertBlock } from "@/components/shared/alert-block";
 import { Button } from "@/components/ui/button";
 import {
@@ -37,12 +43,7 @@ import {
 } from "@/components/ui/tooltip";
 import { slugify } from "@/lib/slug";
 import { api } from "@/utils/api";
-import { zodResolver } from "@hookform/resolvers/zod";
-import { Folder, HelpCircle } from "lucide-react";
-import { useState } from "react";
-import { useForm } from "react-hook-form";
-import { toast } from "sonner";
-import { z } from "zod";
+import { APP_NAME_MESSAGE, APP_NAME_REGEX } from "@/utils/schema";
 
 const AddTemplateSchema = z.object({
 	name: z.string().min(1, {
@@ -53,9 +54,8 @@ const AddTemplateSchema = z.object({
 		.min(1, {
 			message: "App name is required",
 		})
-		.regex(/^[a-z](?!.*--)([a-z0-9-]*[a-z])?$/, {
-			message:
-				"App name supports lowercase letters, numbers, '-' and can only start and end letters, and does not support continuous '-'",
+		.regex(APP_NAME_REGEX, {
+			message: APP_NAME_MESSAGE,
 		}),
 	description: z.string().optional(),
 	serverId: z.string().optional(),
@@ -64,18 +64,27 @@ const AddTemplateSchema = z.object({
 type AddTemplate = z.infer<typeof AddTemplateSchema>;
 
 interface Props {
-	projectId: string;
+	environmentId: string;
 	projectName?: string;
 }
 
-export const AddApplication = ({ projectId, projectName }: Props) => {
+export const AddApplication = ({ environmentId, projectName }: Props) => {
 	const utils = api.useUtils();
-
+	const { data: isCloud } = api.settings.isCloud.useQuery();
+	const { data: webServerSettings } =
+		api.settings.getWebServerSettings.useQuery();
+	const showLocalOption = !isCloud && !webServerSettings?.remoteServersOnly;
 	const [visible, setVisible] = useState(false);
 	const slug = slugify(projectName);
 	const { data: servers } = api.server.withSSHKey.useQuery();
 
-	const { mutateAsync, isLoading, error, isError } =
+	const hasServers = servers && servers.length > 0;
+	// Show dropdown logic based on cloud environment
+	// Cloud: show only if there are remote servers (no Dokploy option)
+	// Self-hosted: show only if there are remote servers (Dokploy is default, hide if no remote servers)
+	const shouldShowServerDropdown = hasServers;
+
+	const { mutateAsync, isPending, error, isError } =
 		api.application.create.useMutation();
 
 	const form = useForm<AddTemplate>({
@@ -92,19 +101,19 @@ export const AddApplication = ({ projectId, projectName }: Props) => {
 			name: data.name,
 			appName: data.appName,
 			description: data.description,
-			projectId,
-			serverId: data.serverId,
+			serverId: data.serverId === "dokploy" ? undefined : data.serverId,
+			environmentId,
 		})
 			.then(async () => {
 				toast.success("Service Created");
 				form.reset();
 				setVisible(false);
-				await utils.project.one.invalidate({
-					projectId,
+				await utils.environment.one.invalidate({
+					environmentId,
 				});
 			})
-			.catch((e) => {
-				toast.error("Error to create the service");
+			.catch(() => {
+				toast.error("Error creating the service");
 			});
 	};
 
@@ -119,7 +128,7 @@ export const AddApplication = ({ projectId, projectName }: Props) => {
 					<span>Application</span>
 				</DropdownMenuItem>
 			</DialogTrigger>
-			<DialogContent className="max-h-screen  overflow-y-auto sm:max-w-lg">
+			<DialogContent className="sm:max-w-lg">
 				<DialogHeader>
 					<DialogTitle>Create</DialogTitle>
 					<DialogDescription>
@@ -144,11 +153,9 @@ export const AddApplication = ({ projectId, projectName }: Props) => {
 											placeholder="Frontend"
 											{...field}
 											onChange={(e) => {
-												const val = e.target.value?.trim() || "";
-												form.setValue(
-													"appName",
-													`${slug}-${val.toLowerCase().replaceAll(" ", "-")}`,
-												);
+												const val = e.target.value || "";
+												const serviceName = slugify(val.trim());
+												form.setValue("appName", `${slug}-${serviceName}`);
 												field.onChange(val);
 											}}
 										/>
@@ -157,63 +164,104 @@ export const AddApplication = ({ projectId, projectName }: Props) => {
 								</FormItem>
 							)}
 						/>
-						<FormField
-							control={form.control}
-							name="serverId"
-							render={({ field }) => (
-								<FormItem>
-									<TooltipProvider delayDuration={0}>
-										<Tooltip>
-											<TooltipTrigger asChild>
-												<FormLabel className="break-all w-fit flex flex-row gap-1 items-center">
-													Select a Server (Optional)
-													<HelpCircle className="size-4 text-muted-foreground" />
-												</FormLabel>
-											</TooltipTrigger>
-											<TooltipContent
-												className="z-[999] w-[300px]"
-												align="start"
-												side="top"
-											>
-												<span>
-													If not server is selected, the application will be
-													deployed on the server where the user is logged in.
-												</span>
-											</TooltipContent>
-										</Tooltip>
-									</TooltipProvider>
+						{shouldShowServerDropdown && (
+							<FormField
+								control={form.control}
+								name="serverId"
+								render={({ field }) => (
+									<FormItem>
+										<TooltipProvider delayDuration={0}>
+											<Tooltip>
+												<TooltipTrigger asChild>
+													<FormLabel className="break-all w-fit flex flex-row gap-1 items-center">
+														Select a Server{" "}
+														{showLocalOption ? "(Optional)" : ""}
+														<HelpCircle className="size-4 text-muted-foreground" />
+													</FormLabel>
+												</TooltipTrigger>
+												<TooltipContent
+													className="z-999 w-[300px]"
+													align="start"
+													side="top"
+												>
+													<span>
+														If no server is selected, the application will be
+														deployed on the server where the user is logged in.
+													</span>
+												</TooltipContent>
+											</Tooltip>
+										</TooltipProvider>
 
-									<Select
-										onValueChange={field.onChange}
-										defaultValue={field.value}
-									>
-										<SelectTrigger>
-											<SelectValue placeholder="Select a Server" />
-										</SelectTrigger>
-										<SelectContent>
-											<SelectGroup>
-												{servers?.map((server) => (
-													<SelectItem
-														key={server.serverId}
-														value={server.serverId}
-													>
-														{server.name}
-													</SelectItem>
-												))}
-												<SelectLabel>Servers ({servers?.length})</SelectLabel>
-											</SelectGroup>
-										</SelectContent>
-									</Select>
-									<FormMessage />
-								</FormItem>
-							)}
-						/>
+										<Select
+											onValueChange={field.onChange}
+											defaultValue={
+												field.value || (showLocalOption ? "dokploy" : undefined)
+											}
+										>
+											<SelectTrigger>
+												<SelectValue
+													placeholder={
+														showLocalOption ? "Dokploy" : "Select a Server"
+													}
+												/>
+											</SelectTrigger>
+											<SelectContent>
+												<SelectGroup>
+													{showLocalOption && (
+														<SelectItem value="dokploy">
+															<span className="flex items-center gap-2 justify-between w-full">
+																<span>Dokploy</span>
+																<span className="text-muted-foreground text-xs self-center">
+																	Default
+																</span>
+															</span>
+														</SelectItem>
+													)}
+													{servers?.map((server) => (
+														<SelectItem
+															key={server.serverId}
+															value={server.serverId}
+														>
+															<span className="flex items-center gap-2 justify-between w-full">
+																<span>{server.name}</span>
+																<span className="text-muted-foreground text-xs self-center">
+																	{server.ipAddress}
+																</span>
+															</span>
+														</SelectItem>
+													))}
+													<SelectLabel>
+														Servers (
+														{servers?.length + (showLocalOption ? 1 : 0)})
+													</SelectLabel>
+												</SelectGroup>
+											</SelectContent>
+										</Select>
+										<FormMessage />
+									</FormItem>
+								)}
+							/>
+						)}
 						<FormField
 							control={form.control}
 							name="appName"
 							render={({ field }) => (
 								<FormItem>
-									<FormLabel>AppName</FormLabel>
+									<FormLabel className="flex items-center gap-2">
+										App Name
+										<TooltipProvider delayDuration={0}>
+											<Tooltip>
+												<TooltipTrigger asChild>
+													<HelpCircle className="size-4 text-muted-foreground" />
+												</TooltipTrigger>
+												<TooltipContent side="right">
+													<p>
+														This will be the name of the Docker Swarm service
+													</p>
+												</TooltipContent>
+											</Tooltip>
+										</TooltipProvider>
+									</FormLabel>
 									<FormControl>
 										<Input placeholder="my-app" {...field} />
 									</FormControl>
@@ -229,7 +277,7 @@ export const AddApplication = ({ projectId, projectName }: Props) => {
 									<FormLabel>Description</FormLabel>
 									<FormControl>
 										<Textarea
-											placeholder="Description about your service..."
+											placeholder="Description of your service..."
 											className="resize-none"
 											{...field}
 										/>
@@ -242,7 +290,7 @@ export const AddApplication = ({ projectId, projectName }: Props) => {
 					</form>
 
 					<DialogFooter>
-						<Button isLoading={isLoading} form="hook-form" type="submit">
+						<Button isLoading={isPending} form="hook-form" type="submit">
 							Create
 						</Button>
 					</DialogFooter>

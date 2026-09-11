@@ -1,16 +1,23 @@
 import type { InferResultType } from "@dokploy/server/types/with";
 import type { CreateServiceOptions } from "dockerode";
+import { resolveServiceNetworks } from "../../services/network";
 import {
 	calculateResources,
 	generateBindMounts,
+	generateConfigContainer,
 	generateFileMounts,
 	generateVolumeMounts,
 	prepareEnvironmentVariables,
 } from "../docker/utils";
 import { getRemoteDocker } from "../servers/remote-docker";
+import { withResolvedVaultRefs } from "../vault";
 
-export type RedisNested = InferResultType<"redis", { mounts: true }>;
-export const buildRedis = async (redis: RedisNested) => {
+export type RedisNested = InferResultType<
+	"redis",
+	{ mounts: true; environment: { with: { project: true } } }
+>;
+export const buildRedis = async (rawRedis: RedisNested) => {
+	const redis = await withResolvedVaultRefs(rawRedis);
 	const {
 		appName,
 		env,
@@ -22,19 +29,39 @@ export const buildRedis = async (redis: RedisNested) => {
 		cpuLimit,
 		cpuReservation,
 		command,
+		args,
 		mounts,
 	} = redis;
 
-	const defaultRedisEnv = `REDIS_PASSWORD=${databasePassword}${
+	const defaultRedisEnv = `REDIS_PASSWORD="${databasePassword}"${
 		env ? `\n${env}` : ""
 	}`;
+
+	const resolvedNetworks = await resolveServiceNetworks(redis);
+
+	const {
+		HealthCheck,
+		RestartPolicy,
+		Placement,
+		Labels,
+		Mode,
+		RollbackConfig,
+		UpdateConfig,
+		StopGracePeriod,
+		EndpointSpec,
+		Ulimits,
+	} = generateConfigContainer(redis);
 	const resources = calculateResources({
 		memoryLimit,
 		memoryReservation,
 		cpuLimit,
 		cpuReservation,
 	});
-	const envVariables = prepareEnvironmentVariables(defaultRedisEnv);
+	const envVariables = prepareEnvironmentVariables(
+		defaultRedisEnv,
+		redis.environment.project.env,
+		redis.environment.env,
+	);
 	const volumesMount = generateVolumeMounts(mounts);
 	const bindsMount = generateBindMounts(mounts);
 	const filesMount = generateFileMounts(appName, redis);
@@ -45,40 +72,57 @@ export const buildRedis = async (redis: RedisNested) => {
 		Name: appName,
 		TaskTemplate: {
 			ContainerSpec: {
+				HealthCheck,
 				Image: dockerImage,
 				Env: envVariables,
 				Mounts: [...volumesMount, ...bindsMount, ...filesMount],
-				Command: ["/bin/sh"],
-				Args: [
-					"-c",
-					command ? command : `redis-server --requirepass ${databasePassword}`,
-				],
+				...(StopGracePeriod !== null &&
+					StopGracePeriod !== undefined && { StopGracePeriod }),
+				...(command || args
+					? {
+							...(command && {
+								Command: command.split(" "),
+							}),
+							...(args &&
+								args.length > 0 && {
+									Args: args,
+								}),
+						}
+					: {
+							Command: ["/bin/sh"],
+							Args: ["-c", `redis-server --requirepass ${databasePassword}`],
+						}),
+				...(Ulimits && { Ulimits }),
+				Labels,
 			},
-			Networks: [{ Target: "dokploy-network" }],
+			Networks: resolvedNetworks,
+			RestartPolicy,
+			Placement,
 			Resources: {
 				...resources,
 			},
-			Placement: {
-				Constraints: ["node.role==manager"],
-			},
 		},
-		Mode: {
-			Replicated: {
-				Replicas: 1,
-			},
-		},
-		EndpointSpec: {
-			Mode: "dnsrr",
-			Ports: externalPort
-				? [
-						{
-							Protocol: "tcp",
-							TargetPort: 6379,
-							PublishedPort: externalPort,
-							PublishMode: "host",
-						},
-					]
-				: [],
+		Mode,
+		RollbackConfig,
+		EndpointSpec: EndpointSpec
+			? EndpointSpec
+			: {
+					Mode: "dnsrr" as const,
+					Ports: externalPort
+						? [
+								{
+									Protocol: "tcp" as const,
+									TargetPort: 6379,
+									PublishedPort: externalPort,
+									PublishMode: "host" as const,
+								},
+							]
+						: [],
+				},
+		UpdateConfig: redis.updateConfigSwarm ?? {
+			Parallelism: 1,
+			Order: "stop-first" as const,
+			FailureAction: "rollback" as const,
 		},
 	};
 
@@ -88,8 +132,12 @@ export const buildRedis = async (redis: RedisNested) => {
 		await service.update({
 			version: Number.parseInt(inspect.Version.Index),
 			...settings,
+			TaskTemplate: {
+				...settings.TaskTemplate,
+				ForceUpdate: inspect.Spec.TaskTemplate.ForceUpdate + 1,
+			},
 		});
-	} catch (error) {
+	} catch {
 		await docker.createService(settings);
 	}
 };

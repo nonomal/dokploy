@@ -1,3 +1,12 @@
+import { standardSchemaResolver as zodResolver } from "@hookform/resolvers/standard-schema";
+import { PlusIcon } from "lucide-react";
+import type React from "react";
+import { useEffect, useState } from "react";
+import { useForm } from "react-hook-form";
+import { toast } from "sonner";
+import { z } from "zod";
+import { AlertBlock } from "@/components/shared/alert-block";
+import { CodeEditor } from "@/components/shared/code-editor";
 import { Button } from "@/components/ui/button";
 import {
 	Dialog,
@@ -18,27 +27,20 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { RadioGroup, RadioGroupItem } from "@/components/ui/radio-group";
-import { Textarea } from "@/components/ui/textarea";
 import { cn } from "@/lib/utils";
 import { api } from "@/utils/api";
-import { zodResolver } from "@hookform/resolvers/zod";
-import { PlusIcon } from "lucide-react";
-import type React from "react";
-import { useEffect, useState } from "react";
-import { useForm } from "react-hook-form";
-import { toast } from "sonner";
-import { z } from "zod";
+
 interface Props {
 	serviceId: string;
 	serviceType:
 		| "application"
-		| "postgres"
-		| "redis"
-		| "mongo"
-		| "redis"
-		| "mysql"
+		| "compose"
+		| "libsql"
 		| "mariadb"
-		| "compose";
+		| "mongo"
+		| "mysql"
+		| "postgres"
+		| "redis";
 	refetch: () => void;
 	children?: React.ReactNode;
 }
@@ -57,7 +59,13 @@ const mySchema = z.discriminatedUnion("type", [
 	z
 		.object({
 			type: z.literal("volume"),
-			volumeName: z.string().min(1, "Volume name required"),
+			volumeName: z
+				.string()
+				.min(1, "Volume name required")
+				.regex(
+					/^[a-zA-Z0-9][a-zA-Z0-9_.-]*$/,
+					"Invalid volume name. Use letters, numbers, '._-' and start with a letter/number.",
+				),
 		})
 		.merge(mountSchema),
 	z
@@ -107,7 +115,7 @@ export const AddVolumes = ({
 					setIsOpen(false);
 				})
 				.catch(() => {
-					toast.error("Error to create the Bind mount");
+					toast.error("Error creating the Bind mount");
 				});
 		} else if (data.type === "volume") {
 			await mutateAsync({
@@ -122,7 +130,7 @@ export const AddVolumes = ({
 					setIsOpen(false);
 				})
 				.catch(() => {
-					toast.error("Error to create the Volume mount");
+					toast.error("Error creating the Volume mount");
 				});
 		} else if (data.type === "file") {
 			await mutateAsync({
@@ -138,7 +146,7 @@ export const AddVolumes = ({
 					setIsOpen(false);
 				})
 				.catch(() => {
-					toast.error("Error to create the File mount");
+					toast.error("Error creating the File mount");
 				});
 		}
 
@@ -150,7 +158,7 @@ export const AddVolumes = ({
 			<DialogTrigger className="" asChild>
 				<Button>{children}</Button>
 			</DialogTrigger>
-			<DialogContent className="max-h-screen  overflow-y-auto sm:max-w-2xl">
+			<DialogContent className="sm:max-w-3xl">
 				<DialogHeader>
 					<DialogTitle>Volumes / Mounts</DialogTitle>
 				</DialogHeader>
@@ -169,6 +177,23 @@ export const AddVolumes = ({
 						onSubmit={form.handleSubmit(onSubmit)}
 						className="grid w-full gap-8 "
 					>
+						{type === "bind" && (
+							<AlertBlock>
+								<div className="space-y-2">
+									<p>
+										Make sure the host path is a valid path and exists in the
+										host machine.
+									</p>
+									<p className="text-sm text-muted-foreground">
+										<strong>Cluster Warning:</strong> If you're using cluster
+										features, bind mounts may cause deployment failures since
+										the path must exist on all worker/manager nodes. Consider
+										using external tools to distribute the folder across nodes
+										or use named volumes instead.
+									</p>
+								</div>
+							</AlertBlock>
+						)}
 						<FormField
 							control={form.control}
 							defaultValue={form.control._defaultValues.type}
@@ -195,7 +220,7 @@ export const AddVolumes = ({
 															/>
 															<Label
 																htmlFor="bind"
-																className="flex flex-col items-center justify-between rounded-md border-2 border-muted bg-popover p-4 hover:bg-accent hover:text-accent-foreground peer-data-[state=checked]:border-primary [&:has([data-state=checked])]:border-primary cursor-pointer"
+																className="flex flex-col items-center justify-between rounded-md border-2 border-muted bg-popover p-4 hover:bg-accent hover:text-accent-foreground peer-data-[state=checked]:border-primary has-data-[state=checked]:border-primary cursor-pointer"
 															>
 																Bind Mount
 															</Label>
@@ -215,7 +240,7 @@ export const AddVolumes = ({
 															/>
 															<Label
 																htmlFor="volume"
-																className="flex flex-col items-center justify-between rounded-md border-2 border-muted bg-popover p-4 hover:bg-accent hover:text-accent-foreground peer-data-[state=checked]:border-primary [&:has([data-state=checked])]:border-primary cursor-pointer"
+																className="flex flex-col items-center justify-between rounded-md border-2 border-muted bg-popover p-4 hover:bg-accent hover:text-accent-foreground peer-data-[state=checked]:border-primary has-data-[state=checked]:border-primary cursor-pointer"
 															>
 																Volume Mount
 															</Label>
@@ -239,7 +264,7 @@ export const AddVolumes = ({
 														/>
 														<Label
 															htmlFor="file"
-															className="flex flex-col items-center justify-between rounded-md border-2 border-muted bg-popover p-4 hover:bg-accent hover:text-accent-foreground peer-data-[state=checked]:border-primary [&:has([data-state=checked])]:border-primary cursor-pointer"
+															className="flex flex-col items-center justify-between rounded-md border-2 border-muted bg-popover p-4 hover:bg-accent hover:text-accent-foreground peer-data-[state=checked]:border-primary has-data-[state=checked]:border-primary cursor-pointer"
 														>
 															File Mount
 														</Label>
@@ -299,13 +324,16 @@ export const AddVolumes = ({
 											control={form.control}
 											name="content"
 											render={({ field }) => (
-												<FormItem>
+												<FormItem className="max-w-full max-w-180">
 													<FormLabel>Content</FormLabel>
 													<FormControl>
 														<FormControl>
-															<Textarea
-																placeholder="Any content"
-																className="h-64"
+															<CodeEditor
+																language="properties"
+																placeholder={`NODE_ENV=production
+PORT=3000
+`}
+																className="h-96 font-mono "
 																{...field}
 															/>
 														</FormControl>

@@ -1,3 +1,10 @@
+import { standardSchemaResolver as zodResolver } from "@hookform/resolvers/standard-schema";
+import Link from "next/link";
+import { useEffect, useState } from "react";
+import { useForm } from "react-hook-form";
+import { toast } from "sonner";
+import { z } from "zod";
+import { AlertBlock } from "@/components/shared/alert-block";
 import { ToggleVisibilityInput } from "@/components/shared/toggle-visibility-input";
 import { Button } from "@/components/ui/button";
 import {
@@ -18,11 +25,6 @@ import {
 import { Input } from "@/components/ui/input";
 import { Label } from "@/components/ui/label";
 import { api } from "@/utils/api";
-import { zodResolver } from "@hookform/resolvers/zod";
-import React, { useEffect, useState } from "react";
-import { useForm } from "react-hook-form";
-import { toast } from "sonner";
-import { z } from "zod";
 
 const DockerProviderSchema = z.object({
 	externalPort: z.preprocess((a) => {
@@ -46,10 +48,10 @@ interface Props {
 export const ShowExternalMysqlCredentials = ({ mysqlId }: Props) => {
 	const { data: ip } = api.settings.getIp.useQuery();
 	const { data, refetch } = api.mysql.one.useQuery({ mysqlId });
-	const { mutateAsync, isLoading } = api.mysql.saveExternalPort.useMutation();
+	const { mutateAsync, isPending } = api.mysql.saveExternalPort.useMutation();
 	const [connectionUrl, setConnectionUrl] = useState("");
 	const getIp = data?.server?.ipAddress || ip;
-	const form = useForm<DockerProvider>({
+	const form = useForm({
 		defaultValues: {},
 		resolver: zodResolver(DockerProviderSchema),
 	});
@@ -71,8 +73,8 @@ export const ShowExternalMysqlCredentials = ({ mysqlId }: Props) => {
 				toast.success("External Port updated");
 				await refetch();
 			})
-			.catch(() => {
-				toast.error("Error to save the external port");
+			.catch((error: Error) => {
+				toast.error(error?.message || "Error saving the external port");
 			});
 	};
 
@@ -100,12 +102,26 @@ export const ShowExternalMysqlCredentials = ({ mysqlId }: Props) => {
 					<CardHeader>
 						<CardTitle className="text-xl">External Credentials</CardTitle>
 						<CardDescription>
-							In order to make the database reachable trought internet is
-							required to set a port, make sure the port is not used by another
-							application or database
+							In order to make the database reachable through the internet, you
+							must set a port and ensure that the port is not being used by
+							another application or database
 						</CardDescription>
 					</CardHeader>
 					<CardContent className="flex w-full flex-col gap-4">
+						{!getIp && (
+							<AlertBlock type="warning">
+								You need to set an IP address in your{" "}
+								<Link
+									href="/dashboard/settings/server"
+									className="text-primary"
+								>
+									{data?.serverId
+										? "Remote Servers -> Server -> Edit Server -> Update IP Address"
+										: "Web Server -> Server -> Update Server IP"}
+								</Link>{" "}
+								to fix the database url connection.
+							</AlertBlock>
+						)}
 						<Form {...form}>
 							<form
 								onSubmit={form.handleSubmit(onSubmit)}
@@ -124,7 +140,7 @@ export const ShowExternalMysqlCredentials = ({ mysqlId }: Props) => {
 															<Input
 																placeholder="3306"
 																{...field}
-																value={field.value || ""}
+																value={field.value as string}
 															/>
 														</FormControl>
 														<FormMessage />
@@ -144,7 +160,7 @@ export const ShowExternalMysqlCredentials = ({ mysqlId }: Props) => {
 								)}
 
 								<div className="flex justify-end">
-									<Button type="submit" isLoading={isLoading}>
+									<Button type="submit" isLoading={isPending}>
 										Save
 									</Button>
 								</div>

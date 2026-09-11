@@ -1,3 +1,9 @@
+import { standardSchemaResolver as zodResolver } from "@hookform/resolvers/standard-schema";
+import { CircuitBoard, HelpCircle } from "lucide-react";
+import { useEffect, useState } from "react";
+import { useForm } from "react-hook-form";
+import { toast } from "sonner";
+import { z } from "zod";
 import { AlertBlock } from "@/components/shared/alert-block";
 import { Button } from "@/components/ui/button";
 import {
@@ -37,12 +43,7 @@ import {
 } from "@/components/ui/tooltip";
 import { slugify } from "@/lib/slug";
 import { api } from "@/utils/api";
-import { zodResolver } from "@hookform/resolvers/zod";
-import { CircuitBoard, HelpCircle } from "lucide-react";
-import { useEffect, useState } from "react";
-import { useForm } from "react-hook-form";
-import { toast } from "sonner";
-import { z } from "zod";
+import { APP_NAME_MESSAGE, APP_NAME_REGEX } from "@/utils/schema";
 
 const AddComposeSchema = z.object({
 	composeType: z.enum(["docker-compose", "stack"]).optional(),
@@ -54,9 +55,8 @@ const AddComposeSchema = z.object({
 		.min(1, {
 			message: "App name is required",
 		})
-		.regex(/^[a-z](?!.*--)([a-z0-9-]*[a-z])?$/, {
-			message:
-				"App name supports lowercase letters, numbers, '-' and can only start and end letters, and does not support continuous '-'",
+		.regex(APP_NAME_REGEX, {
+			message: APP_NAME_MESSAGE,
 		}),
 	description: z.string().optional(),
 	serverId: z.string().optional(),
@@ -65,17 +65,27 @@ const AddComposeSchema = z.object({
 type AddCompose = z.infer<typeof AddComposeSchema>;
 
 interface Props {
-	projectId: string;
+	environmentId: string;
 	projectName?: string;
 }
 
-export const AddCompose = ({ projectId, projectName }: Props) => {
+export const AddCompose = ({ environmentId, projectName }: Props) => {
 	const utils = api.useUtils();
 	const [visible, setVisible] = useState(false);
 	const slug = slugify(projectName);
+	const { data: isCloud } = api.settings.isCloud.useQuery();
+	const { data: webServerSettings } =
+		api.settings.getWebServerSettings.useQuery();
+	const showLocalOption = !isCloud && !webServerSettings?.remoteServersOnly;
 	const { data: servers } = api.server.withSSHKey.useQuery();
-	const { mutateAsync, isLoading, error, isError } =
+	const { mutateAsync, isPending, error, isError } =
 		api.compose.create.useMutation();
+
+	const hasServers = servers && servers.length > 0;
+	// Show dropdown logic based on cloud environment
+	// Cloud: show only if there are remote servers (no Dokploy option)
+	// Self-hosted: show only if there are remote servers (Dokploy is default, hide if no remote servers)
+	const shouldShowServerDropdown = hasServers;
 
 	const form = useForm<AddCompose>({
 		defaultValues: {
@@ -95,20 +105,23 @@ export const AddCompose = ({ projectId, projectName }: Props) => {
 		await mutateAsync({
 			name: data.name,
 			description: data.description,
-			projectId,
+			environmentId,
 			composeType: data.composeType,
 			appName: data.appName,
-			serverId: data.serverId,
+			serverId: data.serverId === "dokploy" ? undefined : data.serverId,
 		})
 			.then(async () => {
 				toast.success("Compose Created");
 				setVisible(false);
-				await utils.project.one.invalidate({
-					projectId,
+				// Invalidate the project query to refresh the environment data
+				await utils.environment.one.invalidate({
+					environmentId,
 				});
+				// Invalidate the project query to refresh the project data for the advance-breadcrumb
+				await utils.project.all.invalidate();
 			})
 			.catch(() => {
-				toast.error("Error to create the compose");
+				toast.error("Error creating the compose");
 			});
 	};
 
@@ -123,7 +136,7 @@ export const AddCompose = ({ projectId, projectName }: Props) => {
 					<span>Compose</span>
 				</DropdownMenuItem>
 			</DialogTrigger>
-			<DialogContent className="max-h-screen  overflow-y-auto sm:max-w-xl">
+			<DialogContent className="sm:max-w-xl">
 				<DialogHeader>
 					<DialogTitle>Create Compose</DialogTitle>
 					<DialogDescription>
@@ -150,11 +163,9 @@ export const AddCompose = ({ projectId, projectName }: Props) => {
 												placeholder="Frontend"
 												{...field}
 												onChange={(e) => {
-													const val = e.target.value?.trim() || "";
-													form.setValue(
-														"appName",
-														`${slug}-${val.toLowerCase()}`,
-													);
+													const val = e.target.value || "";
+													const serviceName = slugify(val.trim());
+													form.setValue("appName", `${slug}-${serviceName}`);
 													field.onChange(val);
 												}}
 											/>
@@ -164,63 +175,90 @@ export const AddCompose = ({ projectId, projectName }: Props) => {
 								)}
 							/>
 						</div>
-						<FormField
-							control={form.control}
-							name="serverId"
-							render={({ field }) => (
-								<FormItem>
-									<TooltipProvider delayDuration={0}>
-										<Tooltip>
-											<TooltipTrigger asChild>
-												<FormLabel className="break-all w-fit flex flex-row gap-1 items-center">
-													Select a Server (Optional)
-													<HelpCircle className="size-4 text-muted-foreground" />
-												</FormLabel>
-											</TooltipTrigger>
-											<TooltipContent
-												className="z-[999] w-[300px]"
-												align="start"
-												side="top"
-											>
-												<span>
-													If not server is selected, the application will be
-													deployed on the server where the user is logged in.
-												</span>
-											</TooltipContent>
-										</Tooltip>
-									</TooltipProvider>
+						{shouldShowServerDropdown && (
+							<FormField
+								control={form.control}
+								name="serverId"
+								render={({ field }) => (
+									<FormItem>
+										<TooltipProvider delayDuration={0}>
+											<Tooltip>
+												<TooltipTrigger asChild>
+													<FormLabel className="break-all w-fit flex flex-row gap-1 items-center">
+														Select a Server{" "}
+														{showLocalOption ? "(Optional)" : ""}
+														<HelpCircle className="size-4 text-muted-foreground" />
+													</FormLabel>
+												</TooltipTrigger>
+												<TooltipContent
+													className="z-999 w-[300px]"
+													align="start"
+													side="top"
+												>
+													<span>
+														If no server is selected, the application will be
+														deployed on the server where the user is logged in.
+													</span>
+												</TooltipContent>
+											</Tooltip>
+										</TooltipProvider>
 
-									<Select
-										onValueChange={field.onChange}
-										defaultValue={field.value}
-									>
-										<SelectTrigger>
-											<SelectValue placeholder="Select a Server" />
-										</SelectTrigger>
-										<SelectContent>
-											<SelectGroup>
-												{servers?.map((server) => (
-													<SelectItem
-														key={server.serverId}
-														value={server.serverId}
-													>
-														{server.name}
-													</SelectItem>
-												))}
-												<SelectLabel>Servers ({servers?.length})</SelectLabel>
-											</SelectGroup>
-										</SelectContent>
-									</Select>
-									<FormMessage />
-								</FormItem>
-							)}
-						/>
+										<Select
+											onValueChange={field.onChange}
+											defaultValue={
+												field.value || (showLocalOption ? "dokploy" : undefined)
+											}
+										>
+											<SelectTrigger>
+												<SelectValue
+													placeholder={
+														showLocalOption ? "Dokploy" : "Select a Server"
+													}
+												/>
+											</SelectTrigger>
+											<SelectContent>
+												<SelectGroup>
+													{showLocalOption && (
+														<SelectItem value="dokploy">
+															<span className="flex items-center gap-2 justify-between w-full">
+																<span>Dokploy</span>
+																<span className="text-muted-foreground text-xs self-center">
+																	Default
+																</span>
+															</span>
+														</SelectItem>
+													)}
+													{servers?.map((server) => (
+														<SelectItem
+															key={server.serverId}
+															value={server.serverId}
+														>
+															<span className="flex items-center gap-2 justify-between w-full">
+																<span>{server.name}</span>
+																<span className="text-muted-foreground text-xs self-center">
+																	{server.ipAddress}
+																</span>
+															</span>
+														</SelectItem>
+													))}
+													<SelectLabel>
+														Servers (
+														{servers?.length + (showLocalOption ? 1 : 0)})
+													</SelectLabel>
+												</SelectGroup>
+											</SelectContent>
+										</Select>
+										<FormMessage />
+									</FormItem>
+								)}
+							/>
+						)}
 						<FormField
 							control={form.control}
 							name="appName"
 							render={({ field }) => (
 								<FormItem>
-									<FormLabel>AppName</FormLabel>
+									<FormLabel>App Name</FormLabel>
 									<FormControl>
 										<Input placeholder="my-app" {...field} />
 									</FormControl>
@@ -262,7 +300,7 @@ export const AddCompose = ({ projectId, projectName }: Props) => {
 									<FormLabel>Description</FormLabel>
 									<FormControl>
 										<Textarea
-											placeholder="Description about your service..."
+											placeholder="Description of your service..."
 											className="resize-none"
 											{...field}
 										/>
@@ -275,7 +313,7 @@ export const AddCompose = ({ projectId, projectName }: Props) => {
 					</form>
 
 					<DialogFooter>
-						<Button isLoading={isLoading} form="hook-form" type="submit">
+						<Button isLoading={isPending} form="hook-form" type="submit">
 							Create
 						</Button>
 					</DialogFooter>

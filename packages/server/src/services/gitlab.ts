@@ -1,27 +1,28 @@
 import { db } from "@dokploy/server/db";
 import {
 	type apiCreateGitlab,
-	type bitbucket,
-	gitProvider,
-	type github,
 	gitlab,
+	gitProvider,
 } from "@dokploy/server/db/schema";
 import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
+import type { z } from "zod";
 
 export type Gitlab = typeof gitlab.$inferSelect;
 
 export const createGitlab = async (
-	input: typeof apiCreateGitlab._type,
-	adminId: string,
+	input: z.infer<typeof apiCreateGitlab>,
+	organizationId: string,
+	userId: string,
 ) => {
 	return await db.transaction(async (tx) => {
 		const newGitProvider = await tx
 			.insert(gitProvider)
 			.values({
 				providerType: "gitlab",
-				adminId: adminId,
+				organizationId: organizationId,
 				name: input.name,
+				userId: userId,
 			})
 			.returning()
 			.then((response) => response[0]);
@@ -29,7 +30,7 @@ export const createGitlab = async (
 		if (!newGitProvider) {
 			throw new TRPCError({
 				code: "BAD_REQUEST",
-				message: "Error to create the git provider",
+				message: "Error creating the Git provider",
 			});
 		}
 

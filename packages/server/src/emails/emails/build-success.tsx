@@ -12,7 +12,7 @@ import {
 	Tailwind,
 	Text,
 } from "@react-email/components";
-import * as React from "react";
+import { emailTailwindConfig } from "../tailwind-config";
 
 export type TemplateProps = {
 	projectName: string;
@@ -20,6 +20,7 @@ export type TemplateProps = {
 	applicationType: string;
 	buildLink: string;
 	date: string;
+	environmentName: string;
 };
 
 export const BuildSuccessEmail = ({
@@ -28,29 +29,20 @@ export const BuildSuccessEmail = ({
 	applicationType = "application",
 	buildLink = "https://dokploy.com/projects/dokploy-test/applications/dokploy-test",
 	date = "2023-05-01T00:00:00.000Z",
+	environmentName = "production",
 }: TemplateProps) => {
 	const previewText = `Build success for ${applicationName}`;
 	return (
 		<Html>
 			<Head />
 			<Preview>{previewText}</Preview>
-			<Tailwind
-				config={{
-					theme: {
-						extend: {
-							colors: {
-								brand: "#007291",
-							},
-						},
-					},
-				}}
-			>
+			<Tailwind config={emailTailwindConfig}>
 				<Body className="bg-white my-auto mx-auto font-sans px-2">
 					<Container className="border border-solid border-[#eaeaea] rounded-lg my-[40px] mx-auto p-[20px] max-w-[465px]">
 						<Section className="mt-[32px]">
 							<Img
 								src={
-									"https://raw.githubusercontent.com/Dokploy/dokploy/canary/logo.png"
+									"https://raw.githubusercontent.com/Dokploy/dokploy/refs/heads/canary/apps/dokploy/logo.png"
 								}
 								width="100"
 								height="50"
@@ -74,6 +66,9 @@ export const BuildSuccessEmail = ({
 							</Text>
 							<Text className="!leading-3">
 								Application Name: <strong>{applicationName}</strong>
+							</Text>
+							<Text className="!leading-3">
+								Environment: <strong>{environmentName}</strong>
 							</Text>
 							<Text className="!leading-3">
 								Application Type: <strong>{applicationType}</strong>

@@ -1,3 +1,8 @@
+import { standardSchemaResolver as zodResolver } from "@hookform/resolvers/standard-schema";
+import { useEffect, useState } from "react";
+import { useForm } from "react-hook-form";
+import { toast } from "sonner";
+import { z } from "zod";
 import { CodeEditor } from "@/components/shared/code-editor";
 import { Button } from "@/components/ui/button";
 import {
@@ -8,13 +13,7 @@ import {
 	FormMessage,
 } from "@/components/ui/form";
 import { api } from "@/utils/api";
-import { zodResolver } from "@hookform/resolvers/zod";
-import { useEffect } from "react";
-import { useForm } from "react-hook-form";
-import { toast } from "sonner";
-import { z } from "zod";
 import { validateAndFormatYAML } from "../../application/advanced/traefik/update-traefik-config";
-import { RandomizeCompose } from "./randomize-compose";
 
 interface Props {
 	composeId: string;
@@ -27,6 +26,8 @@ const AddComposeFile = z.object({
 type AddComposeFile = z.infer<typeof AddComposeFile>;
 
 export const ComposeFileEditor = ({ composeId }: Props) => {
+	const { data: permissions } = api.user.getPermissions.useQuery();
+	const canUpdate = permissions?.service.create ?? false;
 	const utils = api.useUtils();
 	const { data, refetch } = api.compose.one.useQuery(
 		{
@@ -35,8 +36,8 @@ export const ComposeFileEditor = ({ composeId }: Props) => {
 		{ enabled: !!composeId },
 	);
 
-	const { mutateAsync, isLoading, error, isError } =
-		api.compose.update.useMutation();
+	const { mutateAsync, isPending } = api.compose.update.useMutation();
+	const [hasUnsavedChanges, setHasUnsavedChanges] = useState(false);
 
 	const form = useForm<AddComposeFile>({
 		defaultValues: {
@@ -45,13 +46,21 @@ export const ComposeFileEditor = ({ composeId }: Props) => {
 		resolver: zodResolver(AddComposeFile),
 	});
 
+	const composeFile = form.watch("composeFile");
+
 	useEffect(() => {
 		if (data) {
 			form.reset({
 				composeFile: data.composeFile || "",
 			});
 		}
-	}, [form, form.reset, data]);
+	}, [form, data]);
+
+	useEffect(() => {
+		if (data?.composeFile !== undefined) {
+			setHasUnsavedChanges(composeFile !== data.composeFile);
+		}
+	}, [composeFile, data?.composeFile]);
 
 	const onSubmit = async (data: AddComposeFile) => {
 		const { valid, error } = validateAndFormatYAML(data.composeFile);
@@ -67,22 +76,53 @@ export const ComposeFileEditor = ({ composeId }: Props) => {
 		await mutateAsync({
 			composeId,
 			composeFile: data.composeFile,
+			composePath: "./docker-compose.yml",
 			sourceType: "raw",
 		})
 			.then(async () => {
 				toast.success("Compose config Updated");
+				setHasUnsavedChanges(false);
 				refetch();
 				await utils.compose.getConvertedCompose.invalidate({
 					composeId,
 				});
 			})
-			.catch((e) => {
-				toast.error("Error to update the compose config");
+			.catch(() => {
+				toast.error("Error updating the Compose config");
 			});
 	};
+
+	// Add keyboard shortcut for Ctrl+S/Cmd+S
+	useEffect(() => {
+		const handleKeyDown = (e: KeyboardEvent) => {
+			if ((e.ctrlKey || e.metaKey) && e.code === "KeyS" && !isPending) {
+				e.preventDefault();
+				form.handleSubmit(onSubmit)();
+			}
+		};
+
+		document.addEventListener("keydown", handleKeyDown);
+		return () => {
+			document.removeEventListener("keydown", handleKeyDown);
+		};
+	}, [form, onSubmit, isPending]);
+
 	return (
 		<>
 			<div className="w-full flex flex-col gap-4 ">
+				<div className="flex items-center justify-between">
+					<div>
+						<h3 className="text-lg font-medium">Compose File</h3>
+						<p className="text-sm text-muted-foreground">
+							Configure your Docker Compose file for this service.
+							{hasUnsavedChanges && (
+								<span className="text-yellow-500 ml-2">
+									(You have unsaved changes)
+								</span>
+							)}
+						</p>
+					</div>
+				</div>
 				<Form {...form}>
 					<form
 						id="hook-form-save-compose-file"
@@ -95,9 +135,10 @@ export const ComposeFileEditor = ({ composeId }: Props) => {
 							render={({ field }) => (
 								<FormItem className="overflow-auto">
 									<FormControl className="">
-										<div className="flex flex-col gap-4 w-full outline-none focus:outline-none overflow-auto">
+										<div className="flex flex-col gap-4 w-full outline-hidden focus:outline-hidden overflow-auto">
 											<CodeEditor
 												// disabled
+												language="yaml"
 												value={field.value}
 												className="font-mono"
 												wrapperClassName="compose-file-editor"
@@ -124,17 +165,17 @@ services:
 					</form>
 				</Form>
 				<div className="flex justify-between flex-col lg:flex-row gap-2">
-					<div className="w-full flex flex-col lg:flex-row gap-4 items-end">
-						<RandomizeCompose composeId={composeId} />
-					</div>
-					<Button
-						type="submit"
-						form="hook-form-save-compose-file"
-						isLoading={isLoading}
-						className="lg:w-fit w-full"
-					>
-						Save
-					</Button>
+					<div className="w-full flex flex-col lg:flex-row gap-4 items-end" />
+					{canUpdate && (
+						<Button
+							type="submit"
+							form="hook-form-save-compose-file"
+							isLoading={isPending}
+							className="lg:w-fit w-full"
+						>
+							Save
+						</Button>
+					)}
 				</div>
 			</div>
 		</>

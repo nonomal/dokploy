@@ -1,3 +1,8 @@
+import { standardSchemaResolver as zodResolver } from "@hookform/resolvers/standard-schema";
+import { useEffect, useState } from "react";
+import { useForm } from "react-hook-form";
+import { toast } from "sonner";
+import { z } from "zod";
 import { AlertBlock } from "@/components/shared/alert-block";
 import { CodeEditor } from "@/components/shared/code-editor";
 import { Button } from "@/components/ui/button";
@@ -18,12 +23,8 @@ import {
 	FormLabel,
 	FormMessage,
 } from "@/components/ui/form";
+import { useHealthCheckAfterMutation } from "@/hooks/use-health-check-after-mutation";
 import { api } from "@/utils/api";
-import { zodResolver } from "@hookform/resolvers/zod";
-import { useEffect, useState } from "react";
-import { useForm } from "react-hook-form";
-import { toast } from "sonner";
-import { z } from "zod";
 
 const schema = z.object({
 	env: z.string(),
@@ -43,8 +44,16 @@ export const EditTraefikEnv = ({ children, serverId }: Props) => {
 		serverId,
 	});
 
-	const { mutateAsync, isLoading, error, isError } =
+	const { mutateAsync, isPending, error, isError } =
 		api.settings.writeTraefikEnv.useMutation();
+
+	const {
+		execute: executeWithHealthCheck,
+		isExecuting: isHealthCheckExecuting,
+	} = useHealthCheckAfterMutation({
+		initialDelay: 5000,
+		successMessage: "Traefik Env Updated",
+	});
 
 	const form = useForm<Schema>({
 		defaultValues: {
@@ -63,25 +72,47 @@ export const EditTraefikEnv = ({ children, serverId }: Props) => {
 	}, [form, form.reset, data]);
 
 	const onSubmit = async (data: Schema) => {
-		await mutateAsync({
-			env: data.env,
-			serverId,
-		})
-			.then(async () => {
-				toast.success("Traefik Env Updated");
-			})
-			.catch(() => {
-				toast.error("Error to update the traefik env");
-			});
+		try {
+			await executeWithHealthCheck(() =>
+				mutateAsync({
+					env: data.env,
+					serverId,
+				}),
+			);
+		} catch {
+			toast.error("Error updating the Traefik env");
+		}
 	};
+
+	// Add keyboard shortcut for Ctrl+S/Cmd+S
+	useEffect(() => {
+		const handleKeyDown = (e: KeyboardEvent) => {
+			if (
+				(e.ctrlKey || e.metaKey) &&
+				e.code === "KeyS" &&
+				!isPending &&
+				!canEdit
+			) {
+				e.preventDefault();
+				form.handleSubmit(onSubmit)();
+			}
+		};
+
+		document.addEventListener("keydown", handleKeyDown);
+		return () => {
+			document.removeEventListener("keydown", handleKeyDown);
+		};
+	}, [form, onSubmit, isPending, canEdit]);
 
 	return (
 		<Dialog>
 			<DialogTrigger asChild>{children}</DialogTrigger>
-			<DialogContent className="max-h-screen  overflow-y-auto sm:max-w-4xl">
+			<DialogContent className="sm:max-w-4xl">
 				<DialogHeader>
-					<DialogTitle>Update Traefik Env</DialogTitle>
-					<DialogDescription>Update the traefik env</DialogDescription>
+					<DialogTitle>Update Traefik Environment</DialogTitle>
+					<DialogDescription>
+						Update the traefik environment variables
+					</DialogDescription>
 				</DialogHeader>
 				{isError && <AlertBlock type="error">{error?.message}</AlertBlock>}
 
@@ -101,7 +132,7 @@ export const EditTraefikEnv = ({ children, serverId }: Props) => {
 										<FormControl>
 											<CodeEditor
 												language="properties"
-												wrapperClassName="h-[35rem] font-mono"
+												wrapperClassName="h-140 font-mono"
 												placeholder={`TRAEFIK_CERTIFICATESRESOLVERS_LETSENCRYPT_ACME_EMAIL=test@localhost.com
 TRAEFIK_CERTIFICATESRESOLVERS_LETSENCRYPT_STORAGE=/etc/dokploy/traefik/dynamic/acme.json
 TRAEFIK_CERTIFICATESRESOLVERS_LETSENCRYPT_HTTP_CHALLENGE=true
@@ -119,7 +150,7 @@ TRAEFIK_CERTIFICATESRESOLVERS_LETSENCRYPT_HTTP_CHALLENGE_DNS_PROVIDER=cloudflare
 										</pre>
 										<div className="flex justify-end absolute z-50 right-6 top-0">
 											<Button
-												className="shadow-sm"
+												className="shadow-xs"
 												variant="secondary"
 												type="button"
 												onClick={async () => {
@@ -137,8 +168,8 @@ TRAEFIK_CERTIFICATESRESOLVERS_LETSENCRYPT_HTTP_CHALLENGE_DNS_PROVIDER=cloudflare
 
 					<DialogFooter>
 						<Button
-							isLoading={isLoading}
-							disabled={canEdit || isLoading}
+							isLoading={isPending || isHealthCheckExecuting}
+							disabled={canEdit || isPending || isHealthCheckExecuting}
 							form="hook-form-update-server-traefik-config"
 							type="submit"
 						>

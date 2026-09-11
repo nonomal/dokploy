@@ -2,32 +2,35 @@ import { db } from "@dokploy/server/db";
 import {
 	type apiCreateMariaDB,
 	backups,
+	buildAppName,
 	mariadb,
 } from "@dokploy/server/db/schema";
-import { generateAppName } from "@dokploy/server/db/schema";
-import { generatePassword } from "@dokploy/server/templates/utils";
+import { generatePassword } from "@dokploy/server/templates";
 import { buildMariadb } from "@dokploy/server/utils/databases/mariadb";
-import { pullImage } from "@dokploy/server/utils/docker/utils";
+import {
+	pullImage,
+	waitForSwarmServiceConvergence,
+} from "@dokploy/server/utils/docker/utils";
+import { execAsyncRemote } from "@dokploy/server/utils/process/execAsync";
 import { TRPCError } from "@trpc/server";
 import { eq, getTableColumns } from "drizzle-orm";
+import { quote } from "shell-quote";
+import type { z } from "zod";
 import { validUniqueServerAppName } from "./project";
-
-import { execAsyncRemote } from "@dokploy/server/utils/process/execAsync";
 
 export type Mariadb = typeof mariadb.$inferSelect;
 
-export const createMariadb = async (input: typeof apiCreateMariaDB._type) => {
-	input.appName =
-		`${input.appName}-${generatePassword(6)}` || generateAppName("mariadb");
-	if (input.appName) {
-		const valid = await validUniqueServerAppName(input.appName);
+export const createMariadb = async (
+	input: z.infer<typeof apiCreateMariaDB>,
+) => {
+	const appName = buildAppName("mariadb", input.appName);
 
-		if (!valid) {
-			throw new TRPCError({
-				code: "CONFLICT",
-				message: "Service with this 'AppName' already exists",
-			});
-		}
+	const valid = await validUniqueServerAppName(appName);
+	if (!valid) {
+		throw new TRPCError({
+			code: "CONFLICT",
+			message: "Service with this 'AppName' already exists",
+		});
 	}
 
 	const newMariadb = await db
@@ -40,6 +43,7 @@ export const createMariadb = async (input: typeof apiCreateMariaDB._type) => {
 			databaseRootPassword: input.databaseRootPassword
 				? input.databaseRootPassword
 				: generatePassword(),
+			appName,
 		})
 		.returning()
 		.then((value) => value[0]);
@@ -59,12 +63,22 @@ export const findMariadbById = async (mariadbId: string) => {
 	const result = await db.query.mariadb.findFirst({
 		where: eq(mariadb.mariadbId, mariadbId),
 		with: {
-			project: true,
+			environment: {
+				with: {
+					project: true,
+				},
+			},
 			mounts: true,
 			server: true,
 			backups: {
 				with: {
-					destination: true,
+					destination: {
+						columns: {
+							accessKey: false,
+							secretAccessKey: false,
+						},
+					},
+					deployments: true,
 				},
 			},
 		},
@@ -82,10 +96,11 @@ export const updateMariadbById = async (
 	mariadbId: string,
 	mariadbData: Partial<Mariadb>,
 ) => {
+	const { appName, ...rest } = mariadbData;
 	const result = await db
 		.update(mariadb)
 		.set({
-			...mariadbData,
+			...rest,
 		})
 		.where(eq(mariadb.mariadbId, mariadbId))
 		.returning();
@@ -121,23 +136,34 @@ export const findMariadbByBackupId = async (backupId: string) => {
 	return result[0];
 };
 
-export const deployMariadb = async (mariadbId: string) => {
+export const deployMariadb = async (
+	mariadbId: string,
+	onData?: (data: any) => void,
+) => {
 	const mariadb = await findMariadbById(mariadbId);
 	try {
+		await updateMariadbById(mariadbId, {
+			applicationStatus: "running",
+		});
+		onData?.("Starting mariadb deployment...");
 		if (mariadb.serverId) {
 			await execAsyncRemote(
 				mariadb.serverId,
-				`docker pull ${mariadb.dockerImage}`,
+				`docker pull ${quote([mariadb.dockerImage])}`,
+				onData,
 			);
 		} else {
-			await pullImage(mariadb.dockerImage);
+			await pullImage(mariadb.dockerImage, onData);
 		}
 
 		await buildMariadb(mariadb);
+		await waitForSwarmServiceConvergence(mariadb.appName, mariadb.serverId);
 		await updateMariadbById(mariadbId, {
 			applicationStatus: "done",
 		});
+		onData?.("Deployment completed successfully!");
 	} catch (error) {
+		onData?.(`Error: ${error}`);
 		await updateMariadbById(mariadbId, {
 			applicationStatus: "error",
 		});

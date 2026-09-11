@@ -1,30 +1,34 @@
 import { db } from "@dokploy/server/db";
-import { type apiCreateRedis, redis } from "@dokploy/server/db/schema";
-import { generateAppName } from "@dokploy/server/db/schema";
-import { generatePassword } from "@dokploy/server/templates/utils";
+import {
+	type apiCreateRedis,
+	buildAppName,
+	redis,
+} from "@dokploy/server/db/schema";
+import { generatePassword } from "@dokploy/server/templates";
 import { buildRedis } from "@dokploy/server/utils/databases/redis";
-import { pullImage } from "@dokploy/server/utils/docker/utils";
+import {
+	pullImage,
+	waitForSwarmServiceConvergence,
+} from "@dokploy/server/utils/docker/utils";
+import { execAsyncRemote } from "@dokploy/server/utils/process/execAsync";
 import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
+import { quote } from "shell-quote";
+import type { z } from "zod";
 import { validUniqueServerAppName } from "./project";
-
-import { execAsyncRemote } from "@dokploy/server/utils/process/execAsync";
 
 export type Redis = typeof redis.$inferSelect;
 
 // https://github.com/drizzle-team/drizzle-orm/discussions/1483#discussioncomment-7523881
-export const createRedis = async (input: typeof apiCreateRedis._type) => {
-	input.appName =
-		`${input.appName}-${generatePassword(6)}` || generateAppName("redis");
-	if (input.appName) {
-		const valid = await validUniqueServerAppName(input.appName);
+export const createRedis = async (input: z.infer<typeof apiCreateRedis>) => {
+	const appName = buildAppName("redis", input.appName);
 
-		if (!valid) {
-			throw new TRPCError({
-				code: "CONFLICT",
-				message: "Service with this 'AppName' already exists",
-			});
-		}
+	const valid = await validUniqueServerAppName(appName);
+	if (!valid) {
+		throw new TRPCError({
+			code: "CONFLICT",
+			message: "Service with this 'AppName' already exists",
+		});
 	}
 
 	const newRedis = await db
@@ -34,6 +38,7 @@ export const createRedis = async (input: typeof apiCreateRedis._type) => {
 			databasePassword: input.databasePassword
 				? input.databasePassword
 				: generatePassword(),
+			appName,
 		})
 		.returning()
 		.then((value) => value[0]);
@@ -52,7 +57,11 @@ export const findRedisById = async (redisId: string) => {
 	const result = await db.query.redis.findFirst({
 		where: eq(redis.redisId, redisId),
 		with: {
-			project: true,
+			environment: {
+				with: {
+					project: true,
+				},
+			},
 			mounts: true,
 			server: true,
 		},
@@ -70,10 +79,11 @@ export const updateRedisById = async (
 	redisId: string,
 	redisData: Partial<Redis>,
 ) => {
+	const { appName, ...rest } = redisData;
 	const result = await db
 		.update(redis)
 		.set({
-			...redisData,
+			...rest,
 		})
 		.where(eq(redis.redisId, redisId))
 		.returning();
@@ -90,20 +100,35 @@ export const removeRedisById = async (redisId: string) => {
 	return result[0];
 };
 
-export const deployRedis = async (redisId: string) => {
+export const deployRedis = async (
+	redisId: string,
+	onData?: (data: any) => void,
+) => {
 	const redis = await findRedisById(redisId);
 	try {
+		await updateRedisById(redisId, {
+			applicationStatus: "running",
+		});
+
+		onData?.("Starting redis deployment...");
 		if (redis.serverId) {
-			await execAsyncRemote(redis.serverId, `docker pull ${redis.dockerImage}`);
+			await execAsyncRemote(
+				redis.serverId,
+				`docker pull ${quote([redis.dockerImage])}`,
+				onData,
+			);
 		} else {
-			await pullImage(redis.dockerImage);
+			await pullImage(redis.dockerImage, onData);
 		}
 
 		await buildRedis(redis);
+		await waitForSwarmServiceConvergence(redis.appName, redis.serverId);
 		await updateRedisById(redisId, {
 			applicationStatus: "done",
 		});
+		onData?.("Deployment completed successfully!");
 	} catch (error) {
+		onData?.(`Error: ${error}`);
 		await updateRedisById(redisId, {
 			applicationStatus: "error",
 		});

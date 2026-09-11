@@ -1,8 +1,8 @@
+import { FolderIcon } from "lucide-react";
+import React, { type ChangeEvent, useRef } from "react";
 import { Card, CardContent } from "@/components/ui/card";
 import { Input } from "@/components/ui/input";
 import { cn } from "@/lib/utils";
-import { FolderIcon } from "lucide-react";
-import React, { type ChangeEvent, useRef } from "react";
 
 interface DropzoneProps
 	extends Omit<
@@ -10,13 +10,24 @@ interface DropzoneProps
 		"value" | "onChange"
 	> {
 	classNameWrapper?: string;
+	classNameContent?: string;
 	className?: string;
 	dropMessage: string;
 	onChange: (acceptedFiles: FileList | null) => void;
 }
 
 export const Dropzone = React.forwardRef<HTMLDivElement, DropzoneProps>(
-	({ className, classNameWrapper, dropMessage, onChange, ...props }, ref) => {
+	(
+		{
+			className,
+			classNameWrapper,
+			classNameContent,
+			dropMessage,
+			onChange,
+			...props
+		},
+		ref,
+	) => {
 		const inputRef = useRef<HTMLInputElement | null>(null);
 		// Function to handle drag over event
 		const handleDragOver = (e: React.DragEvent<HTMLDivElement>) => {
@@ -51,14 +62,17 @@ export const Dropzone = React.forwardRef<HTMLDivElement, DropzoneProps>(
 				)}
 			>
 				<CardContent
-					className="flex flex-col items-center justify-center space-y-2 px-2 py-4 text-xs h-96"
+					className={cn(
+						"flex flex-col items-center justify-center space-y-2 px-2 py-4 text-xs h-96",
+						classNameContent,
+					)}
 					onDragOver={handleDragOver}
 					onDrop={handleDrop}
 					onClick={handleButtonClick}
 				>
-					<div className="flex items-center justify-center text-muted-foreground">
-						<span className="font-medium text-xl flex items-center gap-2">
-							<FolderIcon className="size-6 text-muted-foreground" />
+					<div className="flex flex-col items-center justify-center text-muted-foreground">
+						<FolderIcon className="size-6 text-muted-foreground" />
+						<span className="font-medium text-xl text-center">
 							{dropMessage}
 						</span>
 						<Input
@@ -67,9 +81,10 @@ export const Dropzone = React.forwardRef<HTMLDivElement, DropzoneProps>(
 							ref={inputRef}
 							type="file"
 							className={cn("hidden", className)}
-							onChange={(e: ChangeEvent<HTMLInputElement>) =>
-								onChange(e.target.files)
-							}
+							onChange={(e: ChangeEvent<HTMLInputElement>) => {
+								onChange(e.target.files);
+								e.target.value = "";
+							}}
 						/>
 					</div>
 				</CardContent>

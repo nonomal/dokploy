@@ -1,3 +1,13 @@
+import { VALID_BRANCH_REGEX } from "@dokploy/server/utils/git-branch-validation";
+import { standardSchemaResolver as zodResolver } from "@hookform/resolvers/standard-schema";
+import { CheckIcon, ChevronsUpDown, HelpCircle, X } from "lucide-react";
+import Link from "next/link";
+import { useEffect } from "react";
+import { useForm } from "react-hook-form";
+import { toast } from "sonner";
+import { z } from "zod";
+import { GithubIcon } from "@/components/icons/data-tools-icons";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
 	Command,
@@ -28,14 +38,16 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
+import {
+	Tooltip,
+	TooltipContent,
+	TooltipProvider,
+	TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { cn } from "@/lib/utils";
 import { api } from "@/utils/api";
-import { zodResolver } from "@hookform/resolvers/zod";
-import { CheckIcon, ChevronsUpDown } from "lucide-react";
-import { useEffect } from "react";
-import { useForm } from "react-hook-form";
-import { toast } from "sonner";
-import { z } from "zod";
+import { DEFAULT_GITHUB_URL } from "@/utils/github-utils";
 
 const GithubProviderSchema = z.object({
 	composePath: z.string().min(1),
@@ -45,8 +57,14 @@ const GithubProviderSchema = z.object({
 			owner: z.string().min(1, "Owner is required"),
 		})
 		.required(),
-	branch: z.string().min(1, "Branch is required"),
+	branch: z
+		.string()
+		.min(1, "Branch is required")
+		.regex(VALID_BRANCH_REGEX, "Invalid branch name"),
 	githubId: z.string().min(1, "Github Provider is required"),
+	watchPaths: z.array(z.string()).optional(),
+	triggerType: z.enum(["push", "tag"]).default("push"),
+	enableSubmodules: z.boolean().default(false),
 });
 
 type GithubProvider = z.infer<typeof GithubProviderSchema>;
@@ -59,10 +77,10 @@ export const SaveGithubProviderCompose = ({ composeId }: Props) => {
 	const { data: githubProviders } = api.github.githubProviders.useQuery();
 	const { data, refetch } = api.compose.one.useQuery({ composeId });
 
-	const { mutateAsync, isLoading: isSavingGithubProvider } =
+	const { mutateAsync, isPending: isSavingGithubProvider } =
 		api.compose.update.useMutation();
 
-	const form = useForm<GithubProvider>({
+	const form = useForm({
 		defaultValues: {
 			composePath: "./docker-compose.yml",
 			repository: {
@@ -71,14 +89,22 @@ export const SaveGithubProviderCompose = ({ composeId }: Props) => {
 			},
 			githubId: "",
 			branch: "",
+			watchPaths: [],
+			triggerType: "push",
+			enableSubmodules: false,
 		},
 		resolver: zodResolver(GithubProviderSchema),
 	});
 
 	const repository = form.watch("repository");
 	const githubId = form.watch("githubId");
+	const triggerType = form.watch("triggerType");
 
-	const { data: repositories, isLoading: isLoadingRepositories } =
+	// Enterprise repositories do not live on github.com.
+	const providerUrl =
+		githubProviders?.find((provider) => provider.githubId === githubId)
+			?.githubUrl ?? DEFAULT_GITHUB_URL;
+	const { data: repositories, isPending: isLoadingRepositories } =
 		api.github.getGithubRepositories.useQuery(
 			{
 				githubId,
@@ -113,9 +139,12 @@ export const SaveGithubProviderCompose = ({ composeId }: Props) => {
 				},
 				composePath: data.composePath,
 				githubId: data.githubId || "",
+				watchPaths: data.watchPaths || [],
+				triggerType: data.triggerType || "push",
+				enableSubmodules: data.enableSubmodules ?? false,
 			});
 		}
-	}, [form.reset, data, form]);
+	}, [form.reset, data]);
 
 	const onSubmit = async (data: GithubProvider) => {
 		await mutateAsync({
@@ -127,13 +156,16 @@ export const SaveGithubProviderCompose = ({ composeId }: Props) => {
 			githubId: data.githubId,
 			sourceType: "github",
 			composeStatus: "idle",
+			watchPaths: data.watchPaths,
+			enableSubmodules: data.enableSubmodules,
+			triggerType: data.triggerType,
 		})
 			.then(async () => {
-				toast.success("Service Provided Saved");
+				toast.success("Service Provider Saved");
 				await refetch();
 			})
 			.catch(() => {
-				toast.error("Error to save the github provider");
+				toast.error("Error saving the Github provider");
 			});
 	};
 
@@ -153,6 +185,9 @@ export const SaveGithubProviderCompose = ({ composeId }: Props) => {
 									<FormLabel>Github Account</FormLabel>
 									<Select
 										onValueChange={(value) => {
+											if (!value) {
+												return;
+											}
 											field.onChange(value);
 											form.setValue("repository", {
 												owner: "",
@@ -160,7 +195,6 @@ export const SaveGithubProviderCompose = ({ composeId }: Props) => {
 											});
 											form.setValue("branch", "");
 										}}
-										defaultValue={field.value}
 										value={field.value}
 									>
 										<FormControl>
@@ -183,53 +217,73 @@ export const SaveGithubProviderCompose = ({ composeId }: Props) => {
 								</FormItem>
 							)}
 						/>
-
 						<FormField
 							control={form.control}
 							name="repository"
 							render={({ field }) => (
 								<FormItem className="md:col-span-2 flex flex-col">
-									<FormLabel>Repository</FormLabel>
+									<div className="flex items-center justify-between">
+										<FormLabel>Repository</FormLabel>
+										{field.value.owner && field.value.repo && (
+											<Link
+												href={`${providerUrl}/${field.value.owner}/${field.value.repo}`}
+												target="_blank"
+												rel="noopener noreferrer"
+												className="flex items-center gap-1 text-sm text-muted-foreground hover:text-primary"
+											>
+												<GithubIcon className="h-4 w-4" />
+												<span>View Repository</span>
+											</Link>
+										)}
+									</div>
 									<Popover>
 										<PopoverTrigger asChild>
 											<FormControl>
 												<Button
 													variant="outline"
-													role="combobox"
 													className={cn(
-														"w-full justify-between !bg-input",
+														"w-full justify-between",
 														!field.value && "text-muted-foreground",
 													)}
 												>
-													{isLoadingRepositories
-														? "Loading...."
-														: field.value.owner
-															? repositories?.find(
-																	(repo) => repo.name === field.value.repo,
-																)?.name
-															: "Select repository"}
+													{!field.value.owner
+														? "Select repository"
+														: isLoadingRepositories
+															? "Loading...."
+															: (repositories?.find(
+																	(repo) =>
+																		repo.name === field.value.repo &&
+																		repo.owner.login === field.value.owner,
+																)?.name ?? field.value.repo)}
 
 													<ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
 												</Button>
 											</FormControl>
 										</PopoverTrigger>
-										<PopoverContent className="p-0" align="start">
+										<PopoverContent
+											className="w-[var(--radix-popover-trigger-width)] p-0"
+											align="start"
+										>
 											<Command>
 												<CommandInput
 													placeholder="Search repository..."
 													className="h-9"
 												/>
-												{isLoadingRepositories && (
+												{!githubId ? (
+													<span className="py-6 text-center text-sm text-muted-foreground">
+														Select a GitHub account first
+													</span>
+												) : isLoadingRepositories ? (
 													<span className="py-6 text-center text-sm">
 														Loading Repositories....
 													</span>
-												)}
+												) : null}
 												<CommandEmpty>No repositories found.</CommandEmpty>
 												<ScrollArea className="h-96">
 													<CommandGroup>
 														{repositories?.map((repo) => (
 															<CommandItem
-																value={repo.url}
+																value={`${repo.owner.login}/${repo.name}`}
 																key={repo.url}
 																onSelect={() => {
 																	form.setValue("repository", {
@@ -239,11 +293,17 @@ export const SaveGithubProviderCompose = ({ composeId }: Props) => {
 																	form.setValue("branch", "");
 																}}
 															>
-																{repo.name}
+																<span className="flex min-w-0 items-center gap-2">
+																	<span className="truncate">{repo.name}</span>
+																	<span className="text-muted-foreground text-xs">
+																		{repo.owner.login}
+																	</span>
+																</span>
 																<CheckIcon
 																	className={cn(
 																		"ml-auto h-4 w-4",
-																		repo.name === field.value.repo
+																		repo.name === field.value.repo &&
+																			repo.owner.login === field.value.owner
 																			? "opacity-100"
 																			: "opacity-0",
 																	)}
@@ -274,30 +334,32 @@ export const SaveGithubProviderCompose = ({ composeId }: Props) => {
 											<FormControl>
 												<Button
 													variant="outline"
-													role="combobox"
 													className={cn(
-														" w-full justify-between !bg-input",
+														" w-full justify-between",
 														!field.value && "text-muted-foreground",
 													)}
 												>
-													{status === "loading" && fetchStatus === "fetching"
+													{status === "pending" && fetchStatus === "fetching"
 														? "Loading...."
 														: field.value
-															? branches?.find(
+															? (branches?.find(
 																	(branch) => branch.name === field.value,
-																)?.name
+																)?.name ?? field.value)
 															: "Select branch"}
 													<ChevronsUpDown className="ml-2 h-4 w-4 shrink-0 opacity-50" />
 												</Button>
 											</FormControl>
 										</PopoverTrigger>
-										<PopoverContent className="p-0" align="start">
+										<PopoverContent
+											className="w-[var(--radix-popover-trigger-width)] p-0"
+											align="start"
+										>
 											<Command>
 												<CommandInput
 													placeholder="Search branch..."
 													className="h-9"
 												/>
-												{status === "loading" && fetchStatus === "fetching" && (
+												{status === "pending" && fetchStatus === "fetching" && (
 													<span className="py-6 text-center text-sm text-muted-foreground">
 														Loading Branches....
 													</span>
@@ -319,7 +381,7 @@ export const SaveGithubProviderCompose = ({ composeId }: Props) => {
 																	form.setValue("branch", branch.name);
 																}}
 															>
-																{branch.name}
+																<span className="truncate">{branch.name}</span>
 																<CheckIcon
 																	className={cn(
 																		"ml-auto h-4 w-4",
@@ -351,6 +413,153 @@ export const SaveGithubProviderCompose = ({ composeId }: Props) => {
 									</FormControl>
 
 									<FormMessage />
+								</FormItem>
+							)}
+						/>
+						<FormField
+							control={form.control}
+							name="triggerType"
+							render={({ field }) => (
+								<FormItem className="md:col-span-2">
+									<div className="flex items-center gap-2">
+										<FormLabel>Trigger Type</FormLabel>
+										<TooltipProvider>
+											<Tooltip>
+												<TooltipTrigger asChild>
+													<HelpCircle className="size-4 text-muted-foreground hover:text-foreground transition-colors cursor-pointer" />
+												</TooltipTrigger>
+												<TooltipContent>
+													<p>
+														Choose when to trigger deployments: on push to the
+														selected branch or when a new tag is created.
+													</p>
+												</TooltipContent>
+											</Tooltip>
+										</TooltipProvider>
+									</div>
+									<Select
+										onValueChange={(value) => {
+											if (!value) {
+												return;
+											}
+											field.onChange(value);
+										}}
+										value={field.value}
+									>
+										<FormControl>
+											<SelectTrigger>
+												<SelectValue placeholder="Select a trigger type" />
+											</SelectTrigger>
+										</FormControl>
+										<SelectContent>
+											<SelectItem value="push">On Push</SelectItem>
+											<SelectItem value="tag">On Tag</SelectItem>
+										</SelectContent>
+									</Select>
+									<FormMessage />
+								</FormItem>
+							)}
+						/>
+						{triggerType === "push" && (
+							<FormField
+								control={form.control}
+								name="watchPaths"
+								render={({ field }) => (
+									<FormItem className="md:col-span-2">
+										<div className="flex items-center gap-2">
+											<FormLabel>Watch Paths</FormLabel>
+											<TooltipProvider>
+												<Tooltip>
+													<TooltipTrigger type="button">
+														<div className="size-4 rounded-full bg-muted flex items-center justify-center text-[10px] font-bold">
+															?
+														</div>
+													</TooltipTrigger>
+													<TooltipContent>
+														<p>
+															Add paths to watch for changes. When files in
+															these paths change, a new deployment will be
+															triggered.
+														</p>
+													</TooltipContent>
+												</Tooltip>
+											</TooltipProvider>
+										</div>
+										<div className="flex flex-wrap gap-2 mb-2">
+											{field.value?.map((path, index) => (
+												<Badge key={index} variant="secondary">
+													{path}
+													<button
+														type="button"
+														aria-label="Remove watch path"
+														className="inline-flex items-center focus-visible:ring-2"
+														onClick={() => {
+															const newPaths = [...(field.value || [])];
+															newPaths.splice(index, 1);
+															form.setValue("watchPaths", newPaths);
+														}}
+													>
+														<X className="ml-1 size-3 cursor-pointer" />
+													</button>
+												</Badge>
+											))}
+										</div>
+										<FormControl>
+											<div className="flex gap-2">
+												<Input
+													placeholder="Enter a path to watch (e.g., src/**, dist/*.js)"
+													onKeyDown={(e) => {
+														if (e.key === "Enter") {
+															e.preventDefault();
+															const input = e.currentTarget;
+															const value = input.value.trim();
+															if (value) {
+																const newPaths = [
+																	...(field.value || []),
+																	value,
+																];
+																form.setValue("watchPaths", newPaths);
+																input.value = "";
+															}
+														}
+													}}
+												/>
+												<Button
+													type="button"
+													variant="secondary"
+													onClick={() => {
+														const input = document.querySelector(
+															'input[placeholder="Enter a path to watch (e.g., src/**, dist/*.js)"]',
+														) as HTMLInputElement;
+														const value = input.value.trim();
+														if (value) {
+															const newPaths = [...(field.value || []), value];
+															form.setValue("watchPaths", newPaths);
+															input.value = "";
+														}
+													}}
+												>
+													Add
+												</Button>
+											</div>
+										</FormControl>
+										<FormMessage />
+									</FormItem>
+								)}
+							/>
+						)}
+						<FormField
+							control={form.control}
+							name="enableSubmodules"
+							render={({ field }) => (
+								<FormItem className="flex flex-row items-center space-x-2 space-y-0">
+									<FormControl>
+										<Switch
+											checked={field.value}
+											onCheckedChange={field.onChange}
+										/>
+									</FormControl>
+									<FormLabel>Enable Submodules</FormLabel>
 								</FormItem>
 							)}
 						/>

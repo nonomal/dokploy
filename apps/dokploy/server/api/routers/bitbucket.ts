@@ -1,5 +1,22 @@
-import { createTRPCRouter, protectedProcedure } from "@/server/api/trpc";
-import { db } from "@/server/db";
+import {
+	assertGitProviderAccess,
+	canViewGitProviderSecrets,
+	createBitbucket,
+	findBitbucketById,
+	getAccessibleGitProviderIds,
+	getBitbucketBranches,
+	getBitbucketRepositories,
+	testBitbucketConnection,
+	updateBitbucket,
+} from "@dokploy/server";
+import { db } from "@dokploy/server/db";
+import { TRPCError } from "@trpc/server";
+import {
+	createTRPCRouter,
+	protectedProcedure,
+	withPermission,
+} from "@/server/api/trpc";
+import { audit } from "@/server/api/utils/audit";
 import {
 	apiBitbucketTestConnection,
 	apiCreateBitbucket,
@@ -7,27 +24,29 @@ import {
 	apiFindOneBitbucket,
 	apiUpdateBitbucket,
 } from "@/server/db/schema";
-import {
-	IS_CLOUD,
-	createBitbucket,
-	findBitbucketById,
-	getBitbucketBranches,
-	getBitbucketRepositories,
-	testBitbucketConnection,
-	updateBitbucket,
-} from "@dokploy/server";
-import { TRPCError } from "@trpc/server";
 
 export const bitbucketRouter = createTRPCRouter({
-	create: protectedProcedure
+	create: withPermission("gitProviders", "create")
 		.input(apiCreateBitbucket)
 		.mutation(async ({ input, ctx }) => {
 			try {
-				return await createBitbucket(input, ctx.user.adminId);
+				const result = await createBitbucket(
+					input,
+					ctx.session.activeOrganizationId,
+					ctx.session.userId,
+				);
+
+				await audit(ctx, {
+					action: "create",
+					resourceType: "gitProvider",
+					resourceName: input.name,
+				});
+
+				return result;
 			} catch (error) {
 				throw new TRPCError({
 					code: "BAD_REQUEST",
-					message: "Error to create this bitbucket provider",
+					message: "Error creating this Bitbucket provider",
 					cause: error,
 				});
 			}
@@ -35,20 +54,24 @@ export const bitbucketRouter = createTRPCRouter({
 	one: protectedProcedure
 		.input(apiFindOneBitbucket)
 		.query(async ({ input, ctx }) => {
-			const bitbucketProvider = await findBitbucketById(input.bitbucketId);
+			const bitbucket = await findBitbucketById(input.bitbucketId);
+			await assertGitProviderAccess(ctx.session, bitbucket.gitProvider);
+
 			if (
-				IS_CLOUD &&
-				bitbucketProvider.gitProvider.adminId !== ctx.user.adminId
+				!(await canViewGitProviderSecrets(ctx.session, bitbucket.gitProvider))
 			) {
-				//TODO: Remove this line when the cloud version is ready
-				throw new TRPCError({
-					code: "UNAUTHORIZED",
-					message: "You are not allowed to access this bitbucket provider",
-				});
+				return {
+					...bitbucket,
+					appPassword: null,
+					apiToken: null,
+				};
 			}
-			return bitbucketProvider;
+
+			return bitbucket;
 		}),
 	bitbucketProviders: protectedProcedure.query(async ({ ctx }) => {
+		const accessibleIds = await getAccessibleGitProviderIds(ctx.session);
+
 		let result = await db.query.bitbucket.findMany({
 			with: {
 				gitProvider: true,
@@ -58,46 +81,29 @@ export const bitbucketRouter = createTRPCRouter({
 			},
 		});
 
-		if (IS_CLOUD) {
-			// TODO: mAyBe a rEfaCtoR 🤫
-			result = result.filter(
-				(provider) => provider.gitProvider.adminId === ctx.user.adminId,
+		result = result.filter((provider) => {
+			return (
+				provider.gitProvider.organizationId ===
+					ctx.session.activeOrganizationId &&
+				accessibleIds.has(provider.gitProvider.gitProviderId)
 			);
-		}
+		});
 		return result;
 	}),
 
 	getBitbucketRepositories: protectedProcedure
 		.input(apiFindOneBitbucket)
 		.query(async ({ input, ctx }) => {
-			const bitbucketProvider = await findBitbucketById(input.bitbucketId);
-			if (
-				IS_CLOUD &&
-				bitbucketProvider.gitProvider.adminId !== ctx.user.adminId
-			) {
-				//TODO: Remove this line when the cloud version is ready
-				throw new TRPCError({
-					code: "UNAUTHORIZED",
-					message: "You are not allowed to access this bitbucket provider",
-				});
-			}
+			const bitbucket = await findBitbucketById(input.bitbucketId);
+			await assertGitProviderAccess(ctx.session, bitbucket.gitProvider);
 			return await getBitbucketRepositories(input.bitbucketId);
 		}),
 	getBitbucketBranches: protectedProcedure
 		.input(apiFindBitbucketBranches)
 		.query(async ({ input, ctx }) => {
-			const bitbucketProvider = await findBitbucketById(
-				input.bitbucketId || "",
-			);
-			if (
-				IS_CLOUD &&
-				bitbucketProvider.gitProvider.adminId !== ctx.user.adminId
-			) {
-				//TODO: Remove this line when the cloud version is ready
-				throw new TRPCError({
-					code: "UNAUTHORIZED",
-					message: "You are not allowed to access this bitbucket provider",
-				});
+			if (input.bitbucketId) {
+				const bitbucket = await findBitbucketById(input.bitbucketId);
+				await assertGitProviderAccess(ctx.session, bitbucket.gitProvider);
 			}
 			return await getBitbucketBranches(input);
 		}),
@@ -105,17 +111,8 @@ export const bitbucketRouter = createTRPCRouter({
 		.input(apiBitbucketTestConnection)
 		.mutation(async ({ input, ctx }) => {
 			try {
-				const bitbucketProvider = await findBitbucketById(input.bitbucketId);
-				if (
-					IS_CLOUD &&
-					bitbucketProvider.gitProvider.adminId !== ctx.user.adminId
-				) {
-					//TODO: Remove this line when the cloud version is ready
-					throw new TRPCError({
-						code: "UNAUTHORIZED",
-						message: "You are not allowed to access this bitbucket provider",
-					});
-				}
+				const bitbucket = await findBitbucketById(input.bitbucketId);
+				await assertGitProviderAccess(ctx.session, bitbucket.gitProvider);
 				const result = await testBitbucketConnection(input);
 
 				return `Found ${result} repositories`;
@@ -126,23 +123,21 @@ export const bitbucketRouter = createTRPCRouter({
 				});
 			}
 		}),
-	update: protectedProcedure
+	update: withPermission("gitProviders", "create")
 		.input(apiUpdateBitbucket)
 		.mutation(async ({ input, ctx }) => {
-			const bitbucketProvider = await findBitbucketById(input.bitbucketId);
-			if (
-				IS_CLOUD &&
-				bitbucketProvider.gitProvider.adminId !== ctx.user.adminId
-			) {
-				//TODO: Remove this line when the cloud version is ready
-				throw new TRPCError({
-					code: "UNAUTHORIZED",
-					message: "You are not allowed to access this bitbucket provider",
-				});
-			}
-			return await updateBitbucket(input.bitbucketId, {
+			const result = await updateBitbucket(input.bitbucketId, {
 				...input,
-				adminId: ctx.user.adminId,
+				organizationId: ctx.session.activeOrganizationId,
 			});
+
+			await audit(ctx, {
+				action: "update",
+				resourceType: "gitProvider",
+				resourceId: input.bitbucketId,
+				resourceName: input.name,
+			});
+
+			return result;
 		}),
 });

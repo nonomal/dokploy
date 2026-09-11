@@ -1,13 +1,17 @@
+import { IS_CLOUD } from "@dokploy/server";
+import { standardSchemaResolver as zodResolver } from "@hookform/resolvers/standard-schema";
+import type { GetServerSidePropsContext } from "next";
+import Link from "next/link";
+import { useRouter } from "next/router";
+import { type ReactElement, useEffect, useState } from "react";
+import { useForm } from "react-hook-form";
+import { toast } from "sonner";
+import { z } from "zod";
 import { OnboardingLayout } from "@/components/layouts/onboarding-layout";
 import { AlertBlock } from "@/components/shared/alert-block";
 import { Logo } from "@/components/shared/logo";
 import { Button } from "@/components/ui/button";
-import {
-	Card,
-	CardContent,
-	CardDescription,
-	CardTitle,
-} from "@/components/ui/card";
+import { CardContent, CardDescription, CardTitle } from "@/components/ui/card";
 import {
 	Form,
 	FormControl,
@@ -17,19 +21,8 @@ import {
 	FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
-import { auth } from "@/server/db/schema";
-import { api } from "@/utils/api";
-import { IS_CLOUD } from "@dokploy/server";
-import { zodResolver } from "@hookform/resolvers/zod";
-import { isBefore } from "date-fns";
-import { eq } from "drizzle-orm";
-import type { GetServerSidePropsContext } from "next";
-import Link from "next/link";
-import { useRouter } from "next/router";
-import { type ReactElement, useEffect } from "react";
-import { useForm } from "react-hook-form";
-import { toast } from "sonner";
-import { z } from "zod";
+import { authClient } from "@/lib/auth-client";
+import { useWhitelabelingPublic } from "@/utils/hooks/use-whitelabeling";
 
 const loginSchema = z
 	.object({
@@ -58,11 +51,13 @@ const loginSchema = z
 type Login = z.infer<typeof loginSchema>;
 
 interface Props {
-	token: string;
+	tokenResetPassword: string;
 }
-export default function Home({ token }: Props) {
-	const { mutateAsync, isLoading, isError, error } =
-		api.auth.resetPassword.useMutation();
+export default function Home({ tokenResetPassword }: Props) {
+	const { config: whitelabeling } = useWhitelabelingPublic();
+	const [token, setToken] = useState<string | null>(tokenResetPassword);
+	const [isLoading, setIsLoading] = useState(false);
+	const [error, setError] = useState<string | null>(null);
 	const router = useRouter();
 	const form = useForm<Login>({
 		defaultValues: {
@@ -73,48 +68,62 @@ export default function Home({ token }: Props) {
 	});
 
 	useEffect(() => {
+		const token = new URLSearchParams(window.location.search).get("token");
+
+		if (token) {
+			setToken(token);
+		}
+	}, [token]);
+
+	useEffect(() => {
 		form.reset();
 	}, [form, form.reset, form.formState.isSubmitSuccessful]);
 
 	const onSubmit = async (values: Login) => {
-		await mutateAsync({
-			resetPasswordToken: token,
-			password: values.password,
-		})
-			.then((data) => {
-				toast.success("Password reset succesfully", {
-					duration: 2000,
-				});
-				router.push("/");
-			})
-			.catch(() => {
-				toast.error("Error to reset password", {
-					duration: 2000,
-				});
-			});
+		setIsLoading(true);
+		const { error } = await authClient.resetPassword({
+			newPassword: values.password,
+			token: token || "",
+		});
+
+		if (error) {
+			setError(error.message || "An error occurred");
+		} else {
+			toast.success("Password reset successfully");
+			router.push("/");
+		}
+		setIsLoading(false);
 	};
 	return (
 		<div className="flex  h-screen w-full items-center justify-center ">
 			<div className="flex flex-col items-center gap-4 w-full">
-				<Link href="/" className="flex flex-row items-center gap-2">
-					<Logo />
-					<span className="font-medium text-sm">Dokploy</span>
-				</Link>
-				<CardTitle className="text-2xl font-bold">Reset Password</CardTitle>
+				<CardTitle className="text-2xl font-bold flex flex-row gap-2 items-center">
+					<Link href="/" className="flex flex-row items-center gap-2">
+						<Logo
+							className="size-12"
+							logoUrl={
+								whitelabeling?.loginLogoUrl ||
+								whitelabeling?.logoUrl ||
+								undefined
+							}
+						/>
+					</Link>
+					Reset Password
+				</CardTitle>
 				<CardDescription>
 					Enter your email to reset your password
 				</CardDescription>
 
-				<Card className="mx-auto w-full max-w-lg bg-transparent ">
-					<div className="p-3.5" />
-					<CardContent>
-						{isError && (
+				<div className="w-full">
+					<CardContent className="p-0">
+						{error && (
 							<AlertBlock type="error" className="my-2">
-								{error?.message}
+								{error}
 							</AlertBlock>
 						)}
 						<Form {...form}>
 							<form
+								method="post"
 								onSubmit={form.handleSubmit(onSubmit)}
 								className="grid gap-4"
 							>
@@ -162,10 +171,14 @@ export default function Home({ token }: Props) {
 										Confirm
 									</Button>
 								</div>
+
+								<div className="text-center text-sm flex gap-2 text-muted-foreground">
+									<Link href="/">Sign in</Link>
+								</div>
 							</form>
 						</Form>
 					</CardContent>
-				</Card>
+				</div>
 			</div>
 		</div>
 	);
@@ -178,7 +191,7 @@ export async function getServerSideProps(context: GetServerSidePropsContext) {
 	if (!IS_CLOUD) {
 		return {
 			redirect: {
-				permanent: true,
+				permanent: false,
 				destination: "/",
 			},
 		};
@@ -188,33 +201,7 @@ export async function getServerSideProps(context: GetServerSidePropsContext) {
 	if (typeof token !== "string") {
 		return {
 			redirect: {
-				permanent: true,
-				destination: "/",
-			},
-		};
-	}
-
-	const authR = await db?.query.auth.findFirst({
-		where: eq(auth.resetPasswordToken, token),
-	});
-
-	if (!authR || authR?.resetPasswordExpiresAt === null) {
-		return {
-			redirect: {
-				permanent: true,
-				destination: "/",
-			},
-		};
-	}
-	const isExpired = isBefore(
-		new Date(authR.resetPasswordExpiresAt),
-		new Date(),
-	);
-
-	if (isExpired) {
-		return {
-			redirect: {
-				permanent: true,
+				permanent: false,
 				destination: "/",
 			},
 		};
@@ -222,7 +209,7 @@ export async function getServerSideProps(context: GetServerSidePropsContext) {
 
 	return {
 		props: {
-			token: authR.resetPasswordToken,
+			tokenResetPassword: token,
 		},
 	};
 }

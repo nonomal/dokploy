@@ -1,13 +1,11 @@
 import { Queue, type RepeatableJob } from "bullmq";
-import IORedis from "ioredis";
-import { logger } from "./logger";
-import type { QueueJob } from "./schema";
+import { logger } from "./logger.js";
+import type { QueueJob } from "./schema.js";
 
-export const connection = new IORedis(process.env.REDIS_URL || "", {
-	maxRetriesPerRequest: null,
-});
 export const jobQueue = new Queue("backupQueue", {
-	connection,
+	connection: {
+		url: process.env.REDIS_URL!,
+	},
 	defaultJobOptions: {
 		removeOnComplete: true,
 		removeOnFail: true,
@@ -23,15 +21,28 @@ export const cleanQueue = async () => {
 	}
 };
 
-export const scheduleJob = (job: QueueJob) => {
+export const scheduleJob = async (job: QueueJob) => {
 	if (job.type === "backup") {
-		jobQueue.add(job.backupId, job, {
+		await jobQueue.add(job.backupId, job, {
 			repeat: {
 				pattern: job.cronSchedule,
 			},
 		});
 	} else if (job.type === "server") {
-		jobQueue.add(`${job.serverId}-cleanup`, job, {
+		await jobQueue.add(`${job.serverId}-cleanup`, job, {
+			repeat: {
+				pattern: job.cronSchedule,
+			},
+		});
+	} else if (job.type === "schedule") {
+		await jobQueue.add(job.scheduleId, job, {
+			repeat: {
+				pattern: job.cronSchedule,
+				tz: job.timezone || "UTC",
+			},
+		});
+	} else if (job.type === "volume-backup") {
+		await jobQueue.add(job.volumeBackupId, job, {
 			repeat: {
 				pattern: job.cronSchedule,
 			},
@@ -54,7 +65,21 @@ export const removeJob = async (data: QueueJob) => {
 		});
 		return result;
 	}
-
+	if (data.type === "schedule") {
+		const { scheduleId, cronSchedule, timezone } = data;
+		const result = await jobQueue.removeRepeatable(scheduleId, {
+			pattern: cronSchedule,
+			tz: timezone || "UTC",
+		});
+		return result;
+	}
+	if (data.type === "volume-backup") {
+		const { volumeBackupId, cronSchedule } = data;
+		const result = await jobQueue.removeRepeatable(volumeBackupId, {
+			pattern: cronSchedule,
+		});
+		return result;
+	}
 	return false;
 };
 
@@ -72,6 +97,15 @@ export const getJobRepeatable = async (
 		const job = repeatableJobs.find((j) => j.name === `${serverId}-cleanup`);
 		return job ? job : null;
 	}
-
+	if (data.type === "schedule") {
+		const { scheduleId } = data;
+		const job = repeatableJobs.find((j) => j.name === scheduleId);
+		return job ? job : null;
+	}
+	if (data.type === "volume-backup") {
+		const { volumeBackupId } = data;
+		const job = repeatableJobs.find((j) => j.name === volumeBackupId);
+		return job ? job : null;
+	}
 	return null;
 };

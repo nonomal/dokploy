@@ -1,3 +1,8 @@
+import { Loader2 } from "lucide-react";
+import dynamic from "next/dynamic";
+import type React from "react";
+import { useEffect, useState } from "react";
+import { Badge } from "@/components/ui/badge";
 import {
 	Dialog,
 	DialogContent,
@@ -6,7 +11,6 @@ import {
 	DialogTitle,
 	DialogTrigger,
 } from "@/components/ui/dialog";
-import { DropdownMenuItem } from "@/components/ui/dropdown-menu";
 import { Label } from "@/components/ui/label";
 import {
 	Select,
@@ -18,10 +22,7 @@ import {
 	SelectValue,
 } from "@/components/ui/select";
 import { api } from "@/utils/api";
-import { Loader2 } from "lucide-react";
-import dynamic from "next/dynamic";
-import type React from "react";
-import { useEffect, useState } from "react";
+import { badgeStateColor } from "../../application/logs/show";
 
 export const DockerLogsId = dynamic(
 	() =>
@@ -37,13 +38,20 @@ interface Props {
 	appName: string;
 	children?: React.ReactNode;
 	serverId?: string;
+	type?: "standalone" | "swarm";
 }
 
-export const ShowModalLogs = ({ appName, children, serverId }: Props) => {
-	const { data, isLoading } = api.docker.getContainersByAppLabel.useQuery(
+export const ShowModalLogs = ({
+	appName,
+	children,
+	serverId,
+	type = "swarm",
+}: Props) => {
+	const { data, isPending } = api.docker.getContainersByAppLabel.useQuery(
 		{
 			appName,
 			serverId,
+			type,
 		},
 		{
 			enabled: !!appName,
@@ -58,15 +66,8 @@ export const ShowModalLogs = ({ appName, children, serverId }: Props) => {
 	}, [data]);
 	return (
 		<Dialog>
-			<DialogTrigger asChild>
-				<DropdownMenuItem
-					className="w-full cursor-pointer space-x-3"
-					onSelect={(e) => e.preventDefault()}
-				>
-					{children}
-				</DropdownMenuItem>
-			</DialogTrigger>
-			<DialogContent className="max-h-[85vh]  overflow-y-auto sm:max-w-7xl">
+			<DialogTrigger asChild>{children}</DialogTrigger>
+			<DialogContent className="max-h-[85vh]  sm:max-w-7xl">
 				<DialogHeader>
 					<DialogTitle>View Logs</DialogTitle>
 					<DialogDescription>View the logs for {appName}</DialogDescription>
@@ -75,7 +76,7 @@ export const ShowModalLogs = ({ appName, children, serverId }: Props) => {
 					<Label>Select a container to view logs</Label>
 					<Select onValueChange={setContainerId} value={containerId}>
 						<SelectTrigger>
-							{isLoading ? (
+							{isPending ? (
 								<div className="flex flex-row gap-2 items-center justify-center text-sm text-muted-foreground">
 									<span>Loading...</span>
 									<Loader2 className="animate-spin size-4" />
@@ -91,7 +92,10 @@ export const ShowModalLogs = ({ appName, children, serverId }: Props) => {
 										key={container.containerId}
 										value={container.containerId}
 									>
-										{container.name} ({container.containerId}) {container.state}
+										{container.name} ({container.containerId}){" "}
+										<Badge variant={badgeStateColor(container.state)}>
+											{container.state}
+										</Badge>
 									</SelectItem>
 								))}
 								<SelectLabel>Containers ({data?.length})</SelectLabel>
@@ -99,9 +103,9 @@ export const ShowModalLogs = ({ appName, children, serverId }: Props) => {
 						</SelectContent>
 					</Select>
 					<DockerLogsId
-						id="terminal"
 						containerId={containerId || ""}
 						serverId={serverId}
+						runType="native"
 					/>
 				</div>
 			</DialogContent>

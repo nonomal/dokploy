@@ -41,17 +41,17 @@ export const createSecurity = async (
 			if (!securityResponse) {
 				throw new TRPCError({
 					code: "BAD_REQUEST",
-					message: "Error to create the security",
+					message: "Error creating the security",
 				});
 			}
 			await createSecurityMiddleware(application, securityResponse);
 			return true;
 		});
 	} catch (error) {
-		console.log(error);
 		throw new TRPCError({
 			code: "BAD_REQUEST",
-			message: "Error to create this security",
+			message:
+				error instanceof Error ? error.message : "Error creating this security",
 			cause: error,
 		});
 	}
@@ -77,9 +77,11 @@ export const deleteSecurityById = async (securityId: string) => {
 		await removeSecurityMiddleware(application, result);
 		return result;
 	} catch (error) {
+		const message =
+			error instanceof Error ? error.message : "Error removing this security";
 		throw new TRPCError({
 			code: "BAD_REQUEST",
-			message: "Error to remove this security",
+			message,
 		});
 	}
 };
@@ -89,19 +91,41 @@ export const updateSecurityById = async (
 	data: Partial<Security>,
 ) => {
 	try {
-		const response = await db
-			.update(security)
-			.set({
-				...data,
-			})
-			.where(eq(security.securityId, securityId))
-			.returning();
+		await db.transaction(async (tx) => {
+			const securityResponse = await findSecurityById(securityId);
 
-		return response[0];
+			const application = await findApplicationById(
+				securityResponse.applicationId,
+			);
+
+			await removeSecurityMiddleware(application, securityResponse);
+
+			const response = await tx
+				.update(security)
+				.set({
+					...data,
+				})
+				.where(eq(security.securityId, securityId))
+				.returning()
+				.then((res) => res[0]);
+
+			if (!response) {
+				throw new TRPCError({
+					code: "NOT_FOUND",
+					message: "Security not found",
+				});
+			}
+
+			await createSecurityMiddleware(application, response);
+
+			return response;
+		});
 	} catch (error) {
+		const message =
+			error instanceof Error ? error.message : "Error updating this security";
 		throw new TRPCError({
 			code: "BAD_REQUEST",
-			message: "Error to update this security",
+			message,
 		});
 	}
 };

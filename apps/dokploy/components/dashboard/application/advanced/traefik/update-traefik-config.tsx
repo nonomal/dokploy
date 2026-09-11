@@ -1,6 +1,13 @@
+import { standardSchemaResolver as zodResolver } from "@hookform/resolvers/standard-schema";
+import { useEffect, useState } from "react";
+import { useForm } from "react-hook-form";
+import { toast } from "sonner";
+import { parse, stringify, YAMLParseError } from "yaml";
+import { z } from "zod";
 import { AlertBlock } from "@/components/shared/alert-block";
 import { CodeEditor } from "@/components/shared/code-editor";
 import { Button } from "@/components/ui/button";
+import { Checkbox } from "@/components/ui/checkbox";
 import {
 	Dialog,
 	DialogContent,
@@ -18,13 +25,8 @@ import {
 	FormLabel,
 	FormMessage,
 } from "@/components/ui/form";
+import { Label } from "@/components/ui/label";
 import { api } from "@/utils/api";
-import { zodResolver } from "@hookform/resolvers/zod";
-import jsyaml from "js-yaml";
-import { useEffect, useState } from "react";
-import { useForm } from "react-hook-form";
-import { toast } from "sonner";
-import { z } from "zod";
 
 const UpdateTraefikConfigSchema = z.object({
 	traefikConfig: z.string(),
@@ -38,11 +40,11 @@ interface Props {
 
 export const validateAndFormatYAML = (yamlText: string) => {
 	try {
-		const obj = jsyaml.load(yamlText);
-		const formattedYaml = jsyaml.dump(obj, { indent: 4 });
+		const obj = parse(yamlText);
+		const formattedYaml = stringify(obj, { indent: 4 });
 		return { valid: true, formattedYaml, error: null };
 	} catch (error) {
-		if (error instanceof jsyaml.YAMLException) {
+		if (error instanceof YAMLParseError) {
 			return {
 				valid: false,
 				formattedYaml: yamlText,
@@ -58,7 +60,10 @@ export const validateAndFormatYAML = (yamlText: string) => {
 };
 
 export const UpdateTraefikConfig = ({ applicationId }: Props) => {
+	const { data: permissions } = api.user.getPermissions.useQuery();
+	const canWrite = permissions?.traefikFiles.write ?? false;
 	const [open, setOpen] = useState(false);
+	const [skipYamlValidation, setSkipYamlValidation] = useState(false);
 	const { data, refetch } = api.application.readTraefikConfig.useQuery(
 		{
 			applicationId,
@@ -66,7 +71,7 @@ export const UpdateTraefikConfig = ({ applicationId }: Props) => {
 		{ enabled: !!applicationId },
 	);
 
-	const { mutateAsync, isLoading, error, isError } =
+	const { mutateAsync, isPending, error, isError } =
 		api.application.updateTraefikConfig.useMutation();
 
 	const form = useForm<UpdateTraefikConfig>({
@@ -85,13 +90,15 @@ export const UpdateTraefikConfig = ({ applicationId }: Props) => {
 	}, [data]);
 
 	const onSubmit = async (data: UpdateTraefikConfig) => {
-		const { valid, error } = validateAndFormatYAML(data.traefikConfig);
-		if (!valid) {
-			form.setError("traefikConfig", {
-				type: "manual",
-				message: error || "Invalid YAML",
-			});
-			return;
+		if (!skipYamlValidation) {
+			const { valid, error } = validateAndFormatYAML(data.traefikConfig);
+			if (!valid) {
+				form.setError("traefikConfig", {
+					type: "manual",
+					message: (error as string) || "Invalid YAML",
+				});
+				return;
+			}
 		}
 		form.clearErrors("traefikConfig");
 		await mutateAsync({
@@ -105,7 +112,7 @@ export const UpdateTraefikConfig = ({ applicationId }: Props) => {
 				form.reset();
 			})
 			.catch(() => {
-				toast.error("Error to update the traefik config");
+				toast.error("Error updating the Traefik config");
 			});
 	};
 
@@ -116,13 +123,16 @@ export const UpdateTraefikConfig = ({ applicationId }: Props) => {
 				setOpen(open);
 				if (!open) {
 					form.reset();
+					setSkipYamlValidation(false);
 				}
 			}}
 		>
-			<DialogTrigger asChild>
-				<Button isLoading={isLoading}>Modify</Button>
-			</DialogTrigger>
-			<DialogContent className="max-h-screen  overflow-y-auto sm:max-w-4xl">
+			{canWrite && (
+				<DialogTrigger asChild>
+					<Button isLoading={isPending}>Modify</Button>
+				</DialogTrigger>
+			)}
+			<DialogContent className="sm:max-w-4xl">
 				<DialogHeader>
 					<DialogTitle>Update traefik config</DialogTitle>
 					<DialogDescription>Update the traefik config</DialogDescription>
@@ -145,7 +155,7 @@ export const UpdateTraefikConfig = ({ applicationId }: Props) => {
 										<FormControl>
 											<CodeEditor
 												lineWrapping
-												wrapperClassName="h-[35rem] font-mono"
+												wrapperClassName="h-140 font-mono"
 												placeholder={`http:
 routers:
     router-name:
@@ -169,9 +179,30 @@ routers:
 						</div>
 					</form>
 
-					<DialogFooter>
+					<DialogFooter className="flex-col sm:flex-row gap-4">
+						<div className="flex flex-col gap-1 w-full sm:w-auto sm:mr-auto">
+							<div className="flex items-center space-x-2">
+								<Checkbox
+									id="skip-yaml-validation-app"
+									checked={skipYamlValidation}
+									onCheckedChange={(checked) =>
+										setSkipYamlValidation(checked === true)
+									}
+								/>
+								<Label
+									htmlFor="skip-yaml-validation-app"
+									className="text-sm font-normal cursor-pointer"
+								>
+									Skip YAML validation (for Go templating)
+								</Label>
+							</div>
+							<p className="text-sm text-muted-foreground">
+								Check to save configs with Go templating (e.g.{" "}
+								<code className="text-xs">{"{{range}}"}</code>).
+							</p>
+						</div>
 						<Button
-							isLoading={isLoading}
+							isLoading={isPending}
 							form="hook-form-update-traefik-config"
 							type="submit"
 						>

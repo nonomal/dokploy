@@ -1,3 +1,14 @@
+import {
+	INVALID_HOSTNAME_MESSAGE,
+	VALID_HOSTNAME_REGEX,
+} from "@dokploy/server/utils/hostname-validation";
+import { standardSchemaResolver as zodResolver } from "@hookform/resolvers/standard-schema";
+import { GlobeIcon } from "lucide-react";
+import { useEffect } from "react";
+import { useForm } from "react-hook-form";
+import { toast } from "sonner";
+import { z } from "zod";
+import { AlertBlock } from "@/components/shared/alert-block";
 import { Button } from "@/components/ui/button";
 import {
 	Card,
@@ -9,6 +20,7 @@ import {
 import {
 	Form,
 	FormControl,
+	FormDescription,
 	FormField,
 	FormItem,
 	FormLabel,
@@ -22,21 +34,37 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
 import { api } from "@/utils/api";
-import { zodResolver } from "@hookform/resolvers/zod";
-import { useEffect } from "react";
-import { useForm } from "react-hook-form";
-import { toast } from "sonner";
-import { z } from "zod";
 
 const addServerDomain = z
 	.object({
-		domain: z.string().min(1, { message: "URL is required" }),
+		domain: z
+			.string()
+			.trim()
+			.toLowerCase()
+			// empty clears the server domain and reverts to IP-only access
+			.refine((val) => val === "" || VALID_HOSTNAME_REGEX.test(val), {
+				message: INVALID_HOSTNAME_MESSAGE,
+			}),
 		letsEncryptEmail: z.string(),
-		certificateType: z.enum(["letsencrypt", "none"]),
+		https: z.boolean().optional(),
+		certificateType: z.enum(["letsencrypt", "none", "custom"]),
 	})
 	.superRefine((data, ctx) => {
-		if (data.certificateType === "letsencrypt" && !data.letsEncryptEmail) {
+		if (data.domain && data.https && !data.certificateType) {
+			ctx.addIssue({
+				code: z.ZodIssueCode.custom,
+				path: ["certificateType"],
+				message: "Required",
+			});
+		}
+		if (
+			data.domain &&
+			data.https &&
+			data.certificateType === "letsencrypt" &&
+			!data.letsEncryptEmail
+		) {
 			ctx.addIssue({
 				code: z.ZodIssueCode.custom,
 				message:
@@ -49,8 +77,8 @@ const addServerDomain = z
 type AddServerDomain = z.infer<typeof addServerDomain>;
 
 export const WebDomain = () => {
-	const { data: user, refetch } = api.admin.one.useQuery();
-	const { mutateAsync, isLoading } =
+	const { data, refetch } = api.settings.getWebServerSettings.useQuery();
+	const { mutateAsync, isPending } =
 		api.settings.assignDomainServer.useMutation();
 
 	const form = useForm<AddServerDomain>({
@@ -58,123 +86,175 @@ export const WebDomain = () => {
 			domain: "",
 			certificateType: "none",
 			letsEncryptEmail: "",
+			https: false,
 		},
 		resolver: zodResolver(addServerDomain),
 	});
+	const https = form.watch("https");
+	const domain = form.watch("domain") || "";
+	const host = data?.host || "";
+	const hasChanged = domain !== host;
 	useEffect(() => {
-		if (user) {
+		if (data) {
 			form.reset({
-				domain: user?.host || "",
-				certificateType: user?.certificateType,
-				letsEncryptEmail: user?.letsEncryptEmail || "",
+				domain: data?.host || "",
+				certificateType: data?.certificateType || "none",
+				letsEncryptEmail: data?.letsEncryptEmail || "",
+				https: data?.https || false,
 			});
 		}
-	}, [form, form.reset, user]);
+	}, [form, form.reset, data]);
 
 	const onSubmit = async (data: AddServerDomain) => {
 		await mutateAsync({
 			host: data.domain,
 			letsEncryptEmail: data.letsEncryptEmail,
 			certificateType: data.certificateType,
+			https: data.https,
 		})
 			.then(async () => {
 				await refetch();
 				toast.success("Domain Assigned");
 			})
 			.catch(() => {
-				toast.error("Error to assign the domain");
+				toast.error("Error assigning the domain");
 			});
 	};
+
 	return (
 		<div className="w-full">
-			<Card className="bg-transparent">
-				<CardHeader>
-					<CardTitle className="text-xl">Server Domain</CardTitle>
-					<CardDescription>
-						Add a domain to your server application.
-					</CardDescription>
-				</CardHeader>
-				<CardContent className="flex w-full flex-col gap-4">
-					<Form {...form}>
-						<form
-							onSubmit={form.handleSubmit(onSubmit)}
-							className="grid w-full gap-4 md:grid-cols-2"
-						>
-							<FormField
-								control={form.control}
-								name="domain"
-								render={({ field }) => {
-									return (
-										<FormItem>
-											<FormLabel>Domain</FormLabel>
-											<FormControl>
-												<Input
-													className="w-full"
-													placeholder={"dokploy.com"}
-													{...field}
-												/>
-											</FormControl>
-											<FormMessage />
-										</FormItem>
-									);
-								}}
-							/>
-
-							<FormField
-								control={form.control}
-								name="letsEncryptEmail"
-								render={({ field }) => {
-									return (
-										<FormItem>
-											<FormLabel>Letsencrypt Email</FormLabel>
-											<FormControl>
-												<Input
-													className="w-full"
-													placeholder={"Dp4kz@example.com"}
-													{...field}
-												/>
-											</FormControl>
-											<FormMessage />
-										</FormItem>
-									);
-								}}
-							/>
-							<FormField
-								control={form.control}
-								name="certificateType"
-								render={({ field }) => {
-									return (
-										<FormItem className="md:col-span-2">
-											<FormLabel>Certificate</FormLabel>
-											<Select
-												onValueChange={field.onChange}
-												value={field.value}
-											>
+			<Card className="h-full bg-sidebar  p-2.5 rounded-xl w-full">
+				<div className="rounded-xl bg-background shadow-md ">
+					<CardHeader className="flex flex-row gap-2 flex-wrap justify-between items-center">
+						<div className="flex flex-col gap-1">
+							<CardTitle className="text-xl flex flex-row gap-2">
+								<GlobeIcon className="size-6 text-muted-foreground self-center" />
+								Server Domain
+							</CardTitle>
+							<CardDescription>
+								Add a domain to your server application.
+							</CardDescription>
+						</div>
+					</CardHeader>
+					<CardContent className="space-y-2 py-6 border-t">
+						{/* Warning for GitHub webhook URL changes */}
+						{hasChanged && (
+							<AlertBlock type="warning">
+								<div className="space-y-2">
+									<p className="font-medium">⚠️ Important: URL Change Impact</p>
+									<p>
+										If you change the Dokploy Server URL make sure to update
+										your Github Apps to keep the auto-deploy working and preview
+										deployments working.
+									</p>
+								</div>
+							</AlertBlock>
+						)}
+						<Form {...form}>
+							<form
+								onSubmit={form.handleSubmit(onSubmit)}
+								className="grid w-full gap-4 grid-cols-2"
+							>
+								<FormField
+									control={form.control}
+									name="domain"
+									render={({ field }) => {
+										return (
+											<FormItem className="col-span-2 md:col-span-1">
+												<FormLabel>Domain</FormLabel>
 												<FormControl>
-													<SelectTrigger>
-														<SelectValue placeholder="Select a certificate" />
-													</SelectTrigger>
+													<Input
+														className="w-full"
+														placeholder={"dokploy.com"}
+														{...field}
+													/>
 												</FormControl>
-												<SelectContent>
-													<SelectItem value={"none"}>None</SelectItem>
-													<SelectItem value={"letsencrypt"}>
-														Letsencrypt (Default)
-													</SelectItem>
-												</SelectContent>
-											</Select>
-											<FormMessage />
+												<FormMessage />
+											</FormItem>
+										);
+									}}
+								/>
+
+								<FormField
+									control={form.control}
+									name="letsEncryptEmail"
+									render={({ field }) => {
+										return (
+											<FormItem className="col-span-2 md:col-span-1">
+												<FormLabel>Let's Encrypt Email</FormLabel>
+												<FormControl>
+													<Input
+														className="w-full"
+														placeholder={"Dp4kz@example.com"}
+														{...field}
+													/>
+												</FormControl>
+												<FormMessage />
+											</FormItem>
+										);
+									}}
+								/>
+								<FormField
+									control={form.control}
+									name="https"
+									render={({ field }) => (
+										<FormItem className="flex flex-row items-center justify-between p-3 mt-4 border rounded-lg shadow-xs w-full col-span-2">
+											<div className="space-y-0.5">
+												<FormLabel>HTTPS</FormLabel>
+												<FormDescription>
+													Automatically provision SSL Certificate.
+												</FormDescription>
+												<FormMessage />
+											</div>
+											<FormControl>
+												<Switch
+													checked={field.value}
+													onCheckedChange={field.onChange}
+												/>
+											</FormControl>
 										</FormItem>
-									);
-								}}
-							/>
-							<div>
-								<Button isLoading={isLoading} type="submit">
-									Save
-								</Button>
-							</div>
-						</form>
-					</Form>
-				</CardContent>
+									)}
+								/>
+								{https && (
+									<FormField
+										control={form.control}
+										name="certificateType"
+										render={({ field }) => {
+											return (
+												<FormItem className="col-span-2">
+													<FormLabel>Certificate Provider</FormLabel>
+													<Select
+														onValueChange={field.onChange}
+														value={field.value}
+													>
+														<FormControl>
+															<SelectTrigger>
+																<SelectValue placeholder="Select a certificate" />
+															</SelectTrigger>
+														</FormControl>
+														<SelectContent>
+															<SelectItem value={"none"}>None</SelectItem>
+															<SelectItem value={"letsencrypt"}>
+																Let's Encrypt
+															</SelectItem>
+														</SelectContent>
+													</Select>
+													<FormMessage />
+												</FormItem>
+											);
+										}}
+									/>
+								)}
+
+								<div className="flex w-full justify-end col-span-2">
+									<Button isLoading={isPending} type="submit">
+										Save
+									</Button>
+								</div>
+							</form>
+						</Form>
+					</CardContent>
+				</div>
 			</Card>
 		</div>
 	);

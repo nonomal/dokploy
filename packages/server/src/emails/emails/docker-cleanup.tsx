@@ -1,6 +1,5 @@
 import {
 	Body,
-	Button,
 	Container,
 	Head,
 	Heading,
@@ -11,7 +10,7 @@ import {
 	Tailwind,
 	Text,
 } from "@react-email/components";
-import * as React from "react";
+import { emailTailwindConfig } from "../tailwind-config";
 
 export type TemplateProps = {
 	message: string;
@@ -26,17 +25,7 @@ export const DockerCleanupEmail = ({
 	return (
 		<Html>
 			<Preview>{previewText}</Preview>
-			<Tailwind
-				config={{
-					theme: {
-						extend: {
-							colors: {
-								brand: "#007291",
-							},
-						},
-					},
-				}}
-			>
+			<Tailwind config={emailTailwindConfig}>
 				<Head />
 
 				<Body className="bg-white my-auto mx-auto font-sans px-2">
@@ -44,7 +33,7 @@ export const DockerCleanupEmail = ({
 						<Section className="mt-[32px]">
 							<Img
 								src={
-									"https://raw.githubusercontent.com/Dokploy/dokploy/canary/logo.png"
+									"https://raw.githubusercontent.com/Dokploy/dokploy/refs/heads/canary/apps/dokploy/logo.png"
 								}
 								width="100"
 								height="50"

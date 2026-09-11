@@ -1,15 +1,15 @@
-import { ShowRequests } from "@/components/dashboard/requests/show-requests";
-import { DashboardLayout } from "@/components/layouts/dashboard-layout";
-import { IS_CLOUD, validateRequest } from "@dokploy/server";
+import { IS_CLOUD } from "@dokploy/server/constants";
+import { validateRequest } from "@dokploy/server/lib/auth";
 import type { GetServerSidePropsContext } from "next";
 import type { ReactElement } from "react";
-import * as React from "react";
+import { ShowRequests } from "@/components/dashboard/requests/show-requests";
+import { DashboardLayout } from "@/components/layouts/dashboard-layout";
 
 export default function Requests() {
 	return <ShowRequests />;
 }
 Requests.getLayout = (page: ReactElement) => {
-	return <DashboardLayout tab={"requests"}>{page}</DashboardLayout>;
+	return <DashboardLayout>{page}</DashboardLayout>;
 };
 export async function getServerSideProps(
 	ctx: GetServerSidePropsContext<{ serviceId: string }>,
@@ -17,16 +17,16 @@ export async function getServerSideProps(
 	if (IS_CLOUD) {
 		return {
 			redirect: {
-				permanent: true,
-				destination: "/dashboard/projects",
+				permanent: false,
+				destination: "/dashboard/home",
 			},
 		};
 	}
-	const { user } = await validateRequest(ctx.req, ctx.res);
+	const { user } = await validateRequest(ctx.req);
 	if (!user) {
 		return {
 			redirect: {
-				permanent: true,
+				permanent: false,
 				destination: "/",
 			},
 		};

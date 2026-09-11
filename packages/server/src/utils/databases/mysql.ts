@@ -1,17 +1,24 @@
 import type { InferResultType } from "@dokploy/server/types/with";
 import type { CreateServiceOptions } from "dockerode";
+import { resolveServiceNetworks } from "../../services/network";
 import {
 	calculateResources,
 	generateBindMounts,
+	generateConfigContainer,
 	generateFileMounts,
 	generateVolumeMounts,
 	prepareEnvironmentVariables,
 } from "../docker/utils";
 import { getRemoteDocker } from "../servers/remote-docker";
+import { withResolvedVaultRefs } from "../vault";
 
-export type MysqlNested = InferResultType<"mysql", { mounts: true }>;
+export type MysqlNested = InferResultType<
+	"mysql",
+	{ mounts: true; environment: { with: { project: true } } }
+>;
 
-export const buildMysql = async (mysql: MysqlNested) => {
+export const buildMysql = async (rawMysql: MysqlNested) => {
+	const mysql = await withResolvedVaultRefs(rawMysql);
 	const {
 		appName,
 		env,
@@ -26,24 +33,44 @@ export const buildMysql = async (mysql: MysqlNested) => {
 		cpuLimit,
 		cpuReservation,
 		command,
+		args,
 		mounts,
 	} = mysql;
 
 	const defaultMysqlEnv =
 		databaseUser !== "root"
-			? `MYSQL_USER=${databaseUser}\nMYSQL_DATABASE=${databaseName}\nMYSQL_PASSWORD=${databasePassword}\nMYSQL_ROOT_PASSWORD=${databaseRootPassword}${
+			? `MYSQL_USER="${databaseUser}"\nMYSQL_DATABASE="${databaseName}"\nMYSQL_PASSWORD="${databasePassword}"\nMYSQL_ROOT_PASSWORD="${databaseRootPassword}"${
 					env ? `\n${env}` : ""
 				}`
-			: `MYSQL_DATABASE=${databaseName}\nMYSQL_ROOT_PASSWORD=${databaseRootPassword}${
+			: `MYSQL_DATABASE="${databaseName}"\nMYSQL_ROOT_PASSWORD="${databaseRootPassword}"${
 					env ? `\n${env}` : ""
 				}`;
+
+	const resolvedNetworks = await resolveServiceNetworks(mysql);
+
+	const {
+		HealthCheck,
+		RestartPolicy,
+		Placement,
+		Labels,
+		Mode,
+		RollbackConfig,
+		UpdateConfig,
+		StopGracePeriod,
+		EndpointSpec,
+		Ulimits,
+	} = generateConfigContainer(mysql);
 	const resources = calculateResources({
 		memoryLimit,
 		memoryReservation,
 		cpuLimit,
 		cpuReservation,
 	});
-	const envVariables = prepareEnvironmentVariables(defaultMysqlEnv);
+	const envVariables = prepareEnvironmentVariables(
+		defaultMysqlEnv,
+		mysql.environment.project.env,
+		mysql.environment.env,
+	);
 	const volumesMount = generateVolumeMounts(mounts);
 	const bindsMount = generateBindMounts(mounts);
 	const filesMount = generateFileMounts(appName, mysql);
@@ -54,41 +81,50 @@ export const buildMysql = async (mysql: MysqlNested) => {
 		Name: appName,
 		TaskTemplate: {
 			ContainerSpec: {
+				HealthCheck,
 				Image: dockerImage,
 				Env: envVariables,
 				Mounts: [...volumesMount, ...bindsMount, ...filesMount],
-				...(command
-					? {
-							Command: ["/bin/sh"],
-							Args: ["-c", command],
-						}
-					: {}),
+				...(StopGracePeriod !== null &&
+					StopGracePeriod !== undefined && { StopGracePeriod }),
+				...(command && {
+					Command: command.split(" "),
+				}),
+				...(args &&
+					args.length > 0 && {
+						Args: args,
+					}),
+				...(Ulimits && { Ulimits }),
+				Labels,
 			},
-			Networks: [{ Target: "dokploy-network" }],
+			Networks: resolvedNetworks,
+			RestartPolicy,
+			Placement,
 			Resources: {
 				...resources,
 			},
-			Placement: {
-				Constraints: ["node.role==manager"],
-			},
 		},
-		Mode: {
-			Replicated: {
-				Replicas: 1,
-			},
-		},
-		EndpointSpec: {
-			Mode: "dnsrr",
-			Ports: externalPort
-				? [
-						{
-							Protocol: "tcp",
-							TargetPort: 3306,
-							PublishedPort: externalPort,
-							PublishMode: "host",
-						},
-					]
-				: [],
+		Mode,
+		RollbackConfig,
+		EndpointSpec: EndpointSpec
+			? EndpointSpec
+			: {
+					Mode: "dnsrr" as const,
+					Ports: externalPort
+						? [
+								{
+									Protocol: "tcp" as const,
+									TargetPort: 3306,
+									PublishedPort: externalPort,
+									PublishMode: "host" as const,
+								},
+							]
+						: [],
+				},
+		UpdateConfig: mysql.updateConfigSwarm ?? {
+			Parallelism: 1,
+			Order: "stop-first" as const,
+			FailureAction: "rollback" as const,
 		},
 	};
 	try {
@@ -97,8 +133,12 @@ export const buildMysql = async (mysql: MysqlNested) => {
 		await service.update({
 			version: Number.parseInt(inspect.Version.Index),
 			...settings,
+			TaskTemplate: {
+				...settings.TaskTemplate,
+				ForceUpdate: inspect.Spec.TaskTemplate.ForceUpdate + 1,
+			},
 		});
-	} catch (error) {
+	} catch {
 		await docker.createService(settings);
 	}
 };

@@ -5,28 +5,71 @@ vi.mock("node:fs", () => ({
 	default: fs,
 }));
 
-import type { Admin, FileConfig } from "@dokploy/server";
+import type { FileConfig } from "@dokploy/server";
 import {
 	createDefaultServerTraefikConfig,
 	loadOrCreateConfig,
 	updateServerTraefik,
 } from "@dokploy/server";
+import type { webServerSettings } from "@dokploy/server/db/schema";
 import { beforeEach, expect, test, vi } from "vitest";
 
-const baseAdmin: Admin = {
-	createdAt: "",
-	authId: "",
-	adminId: "string",
-	serverIp: null,
+type WebServerSettings = typeof webServerSettings.$inferSelect;
+
+const baseSettings: WebServerSettings = {
+	id: "",
+	https: false,
 	certificateType: "none",
 	host: null,
+	serverIp: null,
 	letsEncryptEmail: null,
 	sshPrivateKey: null,
 	enableDockerCleanup: false,
-	enableLogRotation: false,
-	serversQuantity: 0,
-	stripeCustomerId: "",
-	stripeSubscriptionId: "",
+	buildsConcurrency: 1,
+	logCleanupCron: null,
+	metricsConfig: {
+		containers: {
+			refreshRate: 20,
+			services: {
+				include: [],
+				exclude: [],
+			},
+		},
+		server: {
+			type: "Dokploy",
+			cronJob: "",
+			port: 4500,
+			refreshRate: 20,
+			retentionDays: 2,
+			token: "",
+			thresholds: {
+				cpu: 0,
+				memory: 0,
+			},
+			urlCallback: "",
+		},
+	},
+	whitelabelingConfig: {
+		appName: null,
+		appDescription: null,
+		logoUrl: null,
+		faviconUrl: null,
+		customCss: null,
+		loginLogoUrl: null,
+		supportUrl: null,
+		docsUrl: null,
+		errorPageTitle: null,
+		errorPageDescription: null,
+		ogImageUrl: null,
+		footerText: null,
+	},
+	cleanupCacheApplications: false,
+	cleanupCacheOnCompose: false,
+	cleanupCacheOnPreviews: false,
+	remoteServersOnly: false,
+	enforceSSO: false,
+	createdAt: null,
+	updatedAt: new Date(),
 };
 
 beforeEach(() => {
@@ -36,7 +79,6 @@ beforeEach(() => {
 
 test("Should read the configuration file", () => {
 	const config: FileConfig = loadOrCreateConfig("dokploy");
-
 	expect(config.http?.routers?.["dokploy-router-app"]?.service).toBe(
 		"dokploy-service-app",
 	);
@@ -45,7 +87,8 @@ test("Should read the configuration file", () => {
 test("Should apply redirect-to-https", () => {
 	updateServerTraefik(
 		{
-			...baseAdmin,
+			...baseSettings,
+			https: true,
 			certificateType: "letsencrypt",
 		},
 		"example.com",
@@ -59,7 +102,7 @@ test("Should apply redirect-to-https", () => {
 });
 
 test("Should change only host when no certificate", () => {
-	updateServerTraefik(baseAdmin, "example.com");
+	updateServerTraefik(baseSettings, "example.com");
 
 	const config: FileConfig = loadOrCreateConfig("dokploy");
 
@@ -69,7 +112,7 @@ test("Should change only host when no certificate", () => {
 test("Should not touch config without host", () => {
 	const originalConfig: FileConfig = loadOrCreateConfig("dokploy");
 
-	updateServerTraefik(baseAdmin, null);
+	updateServerTraefik(baseSettings, null);
 
 	const config: FileConfig = loadOrCreateConfig("dokploy");
 
@@ -77,14 +120,15 @@ test("Should not touch config without host", () => {
 });
 
 test("Should remove websecure if https rollback to http", () => {
-	const originalConfig: FileConfig = loadOrCreateConfig("dokploy");
-
 	updateServerTraefik(
-		{ ...baseAdmin, certificateType: "letsencrypt" },
+		{ ...baseSettings, certificateType: "letsencrypt" },
 		"example.com",
 	);
 
-	updateServerTraefik({ ...baseAdmin, certificateType: "none" }, "example.com");
+	updateServerTraefik(
+		{ ...baseSettings, certificateType: "none" },
+		"example.com",
+	);
 
 	const config: FileConfig = loadOrCreateConfig("dokploy");
 

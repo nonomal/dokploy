@@ -1,12 +1,18 @@
+import { Loader2 } from "lucide-react";
+import dynamic from "next/dynamic";
+import type React from "react";
+import { useEffect, useState } from "react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import {
 	Dialog,
 	DialogContent,
 	DialogDescription,
+	DialogFooter,
 	DialogHeader,
 	DialogTitle,
 	DialogTrigger,
 } from "@/components/ui/dialog";
-import { Label } from "@/components/ui/label";
 import {
 	Select,
 	SelectContent,
@@ -17,10 +23,7 @@ import {
 	SelectValue,
 } from "@/components/ui/select";
 import { api } from "@/utils/api";
-import { Loader2 } from "lucide-react";
-import dynamic from "next/dynamic";
-import type React from "react";
-import { useEffect, useState } from "react";
+import { badgeStateColor } from "../../application/logs/show";
 
 const Terminal = dynamic(
 	() =>
@@ -36,39 +39,71 @@ interface Props {
 	appName: string;
 	children?: React.ReactNode;
 	serverId?: string;
+	appType?: "stack" | "docker-compose";
+	serviceId?: string;
 }
 
-export const DockerTerminalModal = ({ children, appName, serverId }: Props) => {
-	const { data, isLoading } = api.docker.getContainersByAppNameMatch.useQuery(
+export const DockerTerminalModal = ({
+	children,
+	appName,
+	serverId,
+	appType,
+	serviceId,
+}: Props) => {
+	const { data, isPending } = api.docker.getContainersByAppNameMatch.useQuery(
 		{
 			appName,
+			appType,
 			serverId,
 		},
 		{
 			enabled: !!appName,
 		},
 	);
+
 	const [containerId, setContainerId] = useState<string | undefined>();
+	const [mainDialogOpen, setMainDialogOpen] = useState(false);
+	const [confirmDialogOpen, setConfirmDialogOpen] = useState(false);
+
+	const handleMainDialogOpenChange = (open: boolean) => {
+		if (!open) {
+			setConfirmDialogOpen(true);
+		} else {
+			setMainDialogOpen(true);
+		}
+	};
+
+	const handleConfirm = () => {
+		setConfirmDialogOpen(false);
+		setMainDialogOpen(false);
+	};
+
+	const handleCancel = () => {
+		setConfirmDialogOpen(false);
+	};
 
 	useEffect(() => {
 		if (data && data?.length > 0) {
 			setContainerId(data[0]?.containerId);
 		}
 	}, [data]);
+
 	return (
-		<Dialog>
+		<Dialog open={mainDialogOpen} onOpenChange={handleMainDialogOpenChange}>
 			<DialogTrigger asChild>{children}</DialogTrigger>
-			<DialogContent className="max-h-[85vh]    overflow-y-auto sm:max-w-7xl">
+			<DialogContent
+				className="max-h-[85vh] sm:max-w-7xl"
+				onEscapeKeyDown={(event) => event.preventDefault()}
+			>
 				<DialogHeader>
 					<DialogTitle>Docker Terminal</DialogTitle>
 					<DialogDescription>
 						Easy way to access to docker container
 					</DialogDescription>
 				</DialogHeader>
-				<Label>Select a container to view logs</Label>
 				<Select onValueChange={setContainerId} value={containerId}>
 					<SelectTrigger>
-						{isLoading ? (
+						{isPending ? (
 							<div className="flex flex-row gap-2 items-center justify-center text-sm text-muted-foreground">
 								<span>Loading...</span>
 								<Loader2 className="animate-spin size-4" />
@@ -84,7 +119,10 @@ export const DockerTerminalModal = ({ children, appName, serverId }: Props) => {
 									key={container.containerId}
 									value={container.containerId}
 								>
-									{container.name} ({container.containerId}) {container.state}
+									{container.name} ({container.containerId}){" "}
+									<Badge variant={badgeStateColor(container.state)}>
+										{container.state}
+									</Badge>
 								</SelectItem>
 							))}
 							<SelectLabel>Containers ({data?.length})</SelectLabel>
@@ -95,7 +133,26 @@ export const DockerTerminalModal = ({ children, appName, serverId }: Props) => {
 					serverId={serverId || ""}
 					id="terminal"
 					containerId={containerId || "select-a-container"}
+					serviceId={serviceId}
 				/>
+				<Dialog open={confirmDialogOpen} onOpenChange={setConfirmDialogOpen}>
+					<DialogContent onEscapeKeyDown={(event) => event.preventDefault()}>
+						<DialogHeader>
+							<DialogTitle>
+								Are you sure you want to close the terminal?
+							</DialogTitle>
+							<DialogDescription>
+								By clicking the confirm button, the terminal will be closed.
+							</DialogDescription>
+						</DialogHeader>
+						<DialogFooter>
+							<Button variant="outline" onClick={handleCancel}>
+								Cancel
+							</Button>
+							<Button onClick={handleConfirm}>Confirm</Button>
+						</DialogFooter>
+					</DialogContent>
+				</Dialog>
 			</DialogContent>
 		</Dialog>
 	);

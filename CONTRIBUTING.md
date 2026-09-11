@@ -2,7 +2,7 @@
 
 Hey, thanks for your interest in contributing to Dokploy! We appreciate your help and taking your time to contribute.
 
-Before you start, please first discuss the feature/bug you want to add with the owners and comunity via github issues.
+Before you start, please first discuss the feature/bug you want to add with the owners and community via github issues.
 
 We have a few guidelines to follow when contributing to this project:
 
@@ -11,6 +11,7 @@ We have a few guidelines to follow when contributing to this project:
 - [Development](#development)
 - [Build](#build)
 - [Pull Request](#pull-request)
+- [Important Considerations](#important-considerations-for-pull-requests)
 
 ## Commit Convention
 
@@ -52,6 +53,8 @@ feat: add new feature
 
 Before you start, please make the clone based on the `canary` branch, since the `main` branch is the source of truth and should always reflect the latest stable release, also the PRs will be merged to the `canary` branch.
 
+We use Node v24.4.0 and recommend this specific version. If you have nvm installed, you can run `nvm install 24.4.0 && nvm use` in the root directory.
+
 ```bash
 git clone https://github.com/dokploy/dokploy.git
 cd dokploy
@@ -59,9 +62,9 @@ pnpm install
 cp apps/dokploy/.env.example apps/dokploy/.env
 ```
 
-## Development
+## Requirements
 
-Is required to have **Docker** installed on your machine.
+- [Docker](/GUIDES.md#docker)
 
 ### Setup
 
@@ -71,9 +74,10 @@ Run the command that will spin up all the required services and files.
 pnpm run dokploy:setup
 ```
 
-Run this script 
+Run this script
+
 ```bash
-pnpm run server:script 
+pnpm run server:script
 ```
 
 Now run the development server.
@@ -84,6 +88,9 @@ pnpm run dokploy:dev
 
 Go to http://localhost:3000 to see the development server
 
+> [!NOTE]
+> This project uses Biome. If your editor is configured to use another formatter such as Prettier, it's recommended to either change it to use Biome or turn it off.
+
 ## Build
 
 ```bash
@@ -92,7 +99,14 @@ pnpm run dokploy:build
 
 ## Docker
 
-To build the docker image
+To build the docker image first run commands to copy .env files
+
+```bash
+cp apps/dokploy/.env.production.example .env.production
+cp apps/dokploy/.env.production.example apps/dokploy/.env.production
+```
+
+then run build command
 
 ```bash
 pnpm run docker:build
@@ -106,16 +120,24 @@ pnpm run docker:push
 
 ## Password Reset
 
-In the case you lost your password, you can reset it using the following command
+In the case you lost your password, you can reset the owner's password using the following command
 
 ```bash
-pnpm run reset-password
+pnpm --filter=dokploy run reset-password
 ```
 
-If you want to test the webhooks on development mode using localtunnel, make sure to install `localtunnel`
+To reset the password of a specific user instead, pass their email as an argument
 
 ```bash
-bunx lt --port 3000
+pnpm --filter=dokploy run reset-password user@example.com
+```
+
+Both commands print the new randomly generated password to the console.
+
+If you want to test the webhooks on development mode using localtunnel, make sure to install [`localtunnel`](https://localtunnel.app/)
+
+```bash
+pnpm dlx localtunnel --port 3000
 ```
 
 If you run into permission issues of docker run the following command
@@ -136,13 +158,18 @@ curl -sSL https://nixpacks.com/install.sh -o install.sh \
 ```
 
 ```bash
+# Install Railpack
+curl -sSL https://railpack.com/install.sh | sh
+```
+
+```bash
 # Install Buildpacks
-curl -sSL "https://github.com/buildpacks/pack/releases/download/v0.32.1/pack-v0.32.1-linux.tgz" | tar -C /usr/local/bin/ --no-same-owner -xzv pack
+curl -sSL "https://github.com/buildpacks/pack/releases/download/v0.39.1/pack-v0.39.1-linux.tgz" | tar -C /usr/local/bin/ --no-same-owner -xzv pack
 ```
 
 ## Pull Request
 
-- The `main` branch is the source of truth and should always reflect the latest stable release.
+- The `canary` branch is the source of truth and should always reflect the latest stable release.
 - Create a new branch for each feature or bug fix.
 - Make sure to add tests for your changes.
 - Make sure to update the documentation for any changes Go to the [docs.dokploy.com](https://docs.dokploy.com) website to see the changes.
@@ -151,121 +178,27 @@ curl -sSL "https://github.com/buildpacks/pack/releases/download/v0.32.1/pack-v0.
 - If your pull request fixes an open issue, please reference the issue in the pull request description.
 - Once your pull request is merged, you will be automatically added as a contributor to the project.
 
+### Important Considerations for Pull Requests
+
+- **Testing is Mandatory:** All Pull Requests **must be tested** by the PR author before submission. You must verify that your changes work as expected in a local development environment (see [Setup](#setup)). **Pull Requests that have not been tested by their creator will be rejected.** This policy keeps the PR history clean and values contributors who submit verified, working code. Untested PRs are often recognizable by disproportionately large or scattered changes for simple tasks—please test first.
+- **Focus and Scope:** Each Pull Request should ideally address a single, well-defined problem or introduce one new feature. This greatly facilitates review and reduces the chances of introducing unintended side effects.
+- **Avoid Unfocused Changes:** Please avoid submitting Pull Requests that contain only minor changes such as whitespace adjustments, IDE-generated formatting, or removal of unused variables, unless these are part of a larger, clearly defined refactor or a dedicated "cleanup" Pull Request that addresses a specific `good first issue` or maintenance task.
+- **Issue Association:** For any significant change, it's highly recommended to open an issue first to discuss the proposed solution with the community and maintainers. This ensures alignment and avoids duplicated effort. If your PR resolves an existing issue, please link it in the description (e.g., `Fixes #123`, `Closes #456`).
+- **Large Features:** Pull Requests that introduce very large or broad features **will not be accepted** unless the idea is first outlined and discussed in a GitHub issue. Large features should be designed together with the Dokploy team so the project stays coherent and moves in the same direction. Open an issue to propose and align on the design before implementing.
+
 Thank you for your contribution!
 
 ## Templates
 
-To add a new template, go to `templates` folder and create a new folder with the name of the template.
+To add a new template, go to `https://github.com/Dokploy/templates` repository and read the README.md file.
 
-Let's take the example of `plausible` template.
-
-1. create a folder in `templates/plausible`
-2. create a `docker-compose.yml` file inside the folder with the content of compose.
-3. create a `index.ts` file inside the folder with the following code as base:
-4. When creating a pull request, please provide a video of the template working in action.
-
-```typescript
-// EXAMPLE
-import {
-  generateHash,
-  generateRandomDomain,
-  type Template,
-  type Schema,
-  type DomainSchema,
-} from "../utils";
-
-export function generate(schema: Schema): Template {
-  // do your stuff here, like create a new domain, generate random passwords, mounts.
-  const mainServiceHash = generateHash(schema.projectName);
-  const mainDomain = generateRandomDomain(schema);
-  const secretBase = generateBase64(64);
-  const toptKeyBase = generateBase64(32);
-
-  const domains: DomainSchema[] = [
-    {
-      host: mainDomain,
-      port: 8000,
-      serviceName: "plausible",
-    },
-  ];
-
-  const envs = [
-    `BASE_URL=http://${mainDomain}`,
-    `SECRET_KEY_BASE=${secretBase}`,
-    `TOTP_VAULT_KEY=${toptKeyBase}`,
-    `HASH=${mainServiceHash}`,
-  ];
-
-  const mounts: Template["mounts"] = [
-    {
-      mountPath: "./clickhouse/clickhouse-config.xml",
-      content: `some content......`,
-    },
-  ];
-
-  return {
-    envs,
-    mounts,
-    domains,
-  };
-}
-```
-
-4. Now you need to add the information about the template to the `templates/templates.ts` is a object with the following properties:
-
-**Make sure the id of the template is the same as the folder name and don't have any spaces, only slugified names and lowercase.**
-
-```typescript
-{
-	id: "plausible",
-	name: "Plausible",
-	version: "v2.1.0",
-	description:
-		"Plausible is a open source, self-hosted web analytics platform that lets you track website traffic and user behavior.",
-	logo: "plausible.svg", // we defined the name and the extension of the logo
-	links: {
-		github: "https://github.com/plausible/plausible",
-		website: "https://plausible.io/",
-		docs: "https://plausible.io/docs",
-	},
-	tags: ["analytics"],
-	load: () => import("./plausible/index").then((m) => m.generate),
-},
-```
-
-5. Add the logo or image of the template to `public/templates/plausible.svg`
-
-### Recomendations
+### Recommendations
 
 - Use the same name of the folder as the id of the template.
 - The logo should be in the public folder.
-- If you want to show a domain in the UI, please add the prefix \_HOST at the end of the variable name.
+- If you want to show a domain in the UI, please add the `_HOST` suffix at the end of the variable name.
 - Test first on a vps or a server to make sure the template works.
 
-## Docs
+## Docs & Website
 
-To run the docs locally, run the following command:
-
-```bash
-pnpm run docs:dev
-```
-
-To build the docs, run the following command:
-
-```bash
-pnpm run docs:build
-```
-
-## Website
-
-To run the website locally, run the following command:
-
-```bash
-pnpm run website:dev
-```
-
-To build the website, run the following command:
-
-```bash
-pnpm run website:build
-```
+To contribute to the Dokploy docs or website, please go to this [repository](https://github.com/Dokploy/website).

@@ -1,79 +1,84 @@
-import { createTRPCRouter, protectedProcedure } from "@/server/api/trpc";
-import { db } from "@/server/db";
+import {
+	assertGitProviderAccess,
+	canViewGitProviderSecrets,
+	findGithubById,
+	getAccessibleGitProviderIds,
+	getGithubBranches,
+	getGithubRepositories,
+	haveGithubRequirements,
+	updateGithub,
+	updateGitProvider,
+} from "@dokploy/server";
+import { db } from "@dokploy/server/db";
+import { TRPCError } from "@trpc/server";
+import {
+	createTRPCRouter,
+	protectedProcedure,
+	withPermission,
+} from "@/server/api/trpc";
+import { audit } from "@/server/api/utils/audit";
 import {
 	apiFindGithubBranches,
 	apiFindOneGithub,
 	apiUpdateGithub,
 } from "@/server/db/schema";
-import {
-	IS_CLOUD,
-	findGithubById,
-	getGithubBranches,
-	getGithubRepositories,
-	haveGithubRequirements,
-	updateGitProvider,
-} from "@dokploy/server";
-import { TRPCError } from "@trpc/server";
 
 export const githubRouter = createTRPCRouter({
 	one: protectedProcedure
 		.input(apiFindOneGithub)
 		.query(async ({ input, ctx }) => {
-			const githubProvider = await findGithubById(input.githubId);
-			if (IS_CLOUD && githubProvider.gitProvider.adminId !== ctx.user.adminId) {
-				//TODO: Remove this line when the cloud version is ready
-				throw new TRPCError({
-					code: "UNAUTHORIZED",
-					message: "You are not allowed to access this github provider",
-				});
+			const github = await findGithubById(input.githubId);
+			await assertGitProviderAccess(ctx.session, github.gitProvider);
+
+			if (!(await canViewGitProviderSecrets(ctx.session, github.gitProvider))) {
+				return {
+					...github,
+					githubClientSecret: null,
+					githubPrivateKey: null,
+					githubWebhookSecret: null,
+				};
 			}
-			return githubProvider;
+
+			return github;
 		}),
 	getGithubRepositories: protectedProcedure
 		.input(apiFindOneGithub)
 		.query(async ({ input, ctx }) => {
-			const githubProvider = await findGithubById(input.githubId);
-			if (IS_CLOUD && githubProvider.gitProvider.adminId !== ctx.user.adminId) {
-				//TODO: Remove this line when the cloud version is ready
-				throw new TRPCError({
-					code: "UNAUTHORIZED",
-					message: "You are not allowed to access this github provider",
-				});
-			}
+			const github = await findGithubById(input.githubId);
+			await assertGitProviderAccess(ctx.session, github.gitProvider);
 			return await getGithubRepositories(input.githubId);
 		}),
 	getGithubBranches: protectedProcedure
 		.input(apiFindGithubBranches)
 		.query(async ({ input, ctx }) => {
-			const githubProvider = await findGithubById(input.githubId || "");
-			if (IS_CLOUD && githubProvider.gitProvider.adminId !== ctx.user.adminId) {
-				//TODO: Remove this line when the cloud version is ready
-				throw new TRPCError({
-					code: "UNAUTHORIZED",
-					message: "You are not allowed to access this github provider",
-				});
+			if (input.githubId) {
+				const github = await findGithubById(input.githubId);
+				await assertGitProviderAccess(ctx.session, github.gitProvider);
 			}
 			return await getGithubBranches(input);
 		}),
 	githubProviders: protectedProcedure.query(async ({ ctx }) => {
+		const accessibleIds = await getAccessibleGitProviderIds(ctx.session);
+
 		let result = await db.query.github.findMany({
 			with: {
 				gitProvider: true,
 			},
 		});
 
-		if (IS_CLOUD) {
-			// TODO: mAyBe a rEfaCtoR 🤫
-			result = result.filter(
-				(provider) => provider.gitProvider.adminId === ctx.user.adminId,
-			);
-		}
+		result = result.filter(
+			(provider) =>
+				provider.gitProvider.organizationId ===
+					ctx.session.activeOrganizationId &&
+				accessibleIds.has(provider.gitProvider.gitProviderId),
+		);
 
 		const filtered = result
 			.filter((provider) => haveGithubRequirements(provider))
 			.map((provider) => {
 				return {
 					githubId: provider.githubId,
+					githubUrl: provider.githubUrl,
 					gitProvider: {
 						...provider.gitProvider,
 					},
@@ -87,17 +92,8 @@ export const githubRouter = createTRPCRouter({
 		.input(apiFindOneGithub)
 		.mutation(async ({ input, ctx }) => {
 			try {
-				const githubProvider = await findGithubById(input.githubId);
-				if (
-					IS_CLOUD &&
-					githubProvider.gitProvider.adminId !== ctx.user.adminId
-				) {
-					//TODO: Remove this line when the cloud version is ready
-					throw new TRPCError({
-						code: "UNAUTHORIZED",
-						message: "You are not allowed to access this github provider",
-					});
-				}
+				const github = await findGithubById(input.githubId);
+				await assertGitProviderAccess(ctx.session, github.gitProvider);
 				const result = await getGithubRepositories(input.githubId);
 				return `Found ${result.length} repositories`;
 			} catch (err) {
@@ -107,20 +103,23 @@ export const githubRouter = createTRPCRouter({
 				});
 			}
 		}),
-	update: protectedProcedure
+	update: withPermission("gitProviders", "create")
 		.input(apiUpdateGithub)
 		.mutation(async ({ input, ctx }) => {
-			const githubProvider = await findGithubById(input.githubId);
-			if (IS_CLOUD && githubProvider.gitProvider.adminId !== ctx.user.adminId) {
-				//TODO: Remove this line when the cloud version is ready
-				throw new TRPCError({
-					code: "UNAUTHORIZED",
-					message: "You are not allowed to access this github provider",
-				});
-			}
 			await updateGitProvider(input.gitProviderId, {
 				name: input.name,
-				adminId: ctx.user.adminId,
+				organizationId: ctx.session.activeOrganizationId,
+			});
+
+			await updateGithub(input.githubId, {
+				...input,
+			});
+
+			await audit(ctx, {
+				action: "update",
+				resourceType: "gitProvider",
+				resourceId: input.gitProviderId,
+				resourceName: input.name,
 			});
 		}),
 });

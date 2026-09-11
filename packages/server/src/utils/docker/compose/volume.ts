@@ -26,17 +26,30 @@ export const addSuffixToVolumesInServices = (
 		if (_.has(newServiceConfig, "volumes")) {
 			newServiceConfig.volumes = _.map(newServiceConfig.volumes, (volume) => {
 				if (_.isString(volume)) {
-					const [volumeName, path] = volume.split(":");
+					// remainder is the container path plus optional access mode (:ro, :z, :Z)
+					const [volumeName, ...pathAndMode] = volume.split(":");
+					const remainder = pathAndMode.join(":");
 
 					// skip bind mounts and variables (e.g. $PWD)
 					if (
-						volumeName?.startsWith(".") ||
-						volumeName?.startsWith("/") ||
-						volumeName?.startsWith("$")
+						!volumeName ||
+						!remainder ||
+						volumeName.startsWith(".") ||
+						volumeName.startsWith("/") ||
+						volumeName.startsWith("$")
 					) {
 						return volume;
 					}
-					return `${volumeName}-${suffix}:${path}`;
+
+					// Handle volume paths with subdirectories
+					const parts = volumeName.split("/");
+					if (parts.length > 1) {
+						const baseName = parts[0];
+						const rest = parts.slice(1).join("/");
+						return `${baseName}-${suffix}/${rest}:${remainder}`;
+					}
+
+					return `${volumeName}-${suffix}:${remainder}`;
 				}
 				if (_.isObject(volume) && volume.type === "volume" && volume.source) {
 					return {

@@ -1,138 +1,79 @@
 import {
 	deployApplication,
 	deployCompose,
-	deployRemoteApplication,
-	deployRemoteCompose,
+	deployPreviewApplication,
 	rebuildApplication,
 	rebuildCompose,
-	rebuildRemoteApplication,
-	rebuildRemoteCompose,
+	rebuildPreviewApplication,
 	updateApplicationStatus,
 	updateCompose,
+	updatePreviewDeployment,
 } from "@dokploy/server";
-import { type Job, Worker } from "bullmq";
-import { myQueue, redisConfig } from "./queueSetup";
+import type { InMemoryJob } from "./in-memory-queue";
 
-type DeployJob =
-	| {
-			applicationId: string;
-			titleLog: string;
-			descriptionLog: string;
-			server?: boolean;
-			type: "deploy" | "redeploy";
-			applicationType: "application";
-			serverId?: string;
-	  }
-	| {
-			composeId: string;
-			titleLog: string;
-			descriptionLog: string;
-			server?: boolean;
-			type: "deploy" | "redeploy";
-			applicationType: "compose";
-			serverId?: string;
-	  };
+/**
+ * Processes a single deployment job. Shared by the in-memory queue worker and
+ * (in cloud) the direct background execution path.
+ */
+export const processDeploymentJob = async (job: InMemoryJob) => {
+	try {
+		if (job.data.applicationType === "application") {
+			await updateApplicationStatus(job.data.applicationId, "running");
 
-export type DeploymentJob = DeployJob;
-
-export const deploymentWorker = new Worker(
-	"deployments",
-	async (job: Job<DeploymentJob>) => {
-		try {
-			if (job.data.applicationType === "application") {
-				await updateApplicationStatus(job.data.applicationId, "running");
-				if (job.data.server) {
-					if (job.data.type === "redeploy") {
-						await rebuildRemoteApplication({
-							applicationId: job.data.applicationId,
-							titleLog: job.data.titleLog,
-							descriptionLog: job.data.descriptionLog,
-						});
-					} else if (job.data.type === "deploy") {
-						await deployRemoteApplication({
-							applicationId: job.data.applicationId,
-							titleLog: job.data.titleLog,
-							descriptionLog: job.data.descriptionLog,
-						});
-					}
-				} else {
-					if (job.data.type === "redeploy") {
-						await rebuildApplication({
-							applicationId: job.data.applicationId,
-							titleLog: job.data.titleLog,
-							descriptionLog: job.data.descriptionLog,
-						});
-					} else if (job.data.type === "deploy") {
-						await deployApplication({
-							applicationId: job.data.applicationId,
-							titleLog: job.data.titleLog,
-							descriptionLog: job.data.descriptionLog,
-						});
-					}
-				}
-			} else if (job.data.applicationType === "compose") {
-				await updateCompose(job.data.composeId, {
-					composeStatus: "running",
+			if (job.data.type === "redeploy") {
+				await rebuildApplication({
+					applicationId: job.data.applicationId,
+					titleLog: job.data.titleLog,
+					descriptionLog: job.data.descriptionLog,
 				});
-
-				if (job.data.server) {
-					if (job.data.type === "redeploy") {
-						await rebuildRemoteCompose({
-							composeId: job.data.composeId,
-							titleLog: job.data.titleLog,
-							descriptionLog: job.data.descriptionLog,
-						});
-					} else if (job.data.type === "deploy") {
-						await deployRemoteCompose({
-							composeId: job.data.composeId,
-							titleLog: job.data.titleLog,
-							descriptionLog: job.data.descriptionLog,
-						});
-					}
-				} else {
-					if (job.data.type === "deploy") {
-						await deployCompose({
-							composeId: job.data.composeId,
-							titleLog: job.data.titleLog,
-							descriptionLog: job.data.descriptionLog,
-						});
-					} else if (job.data.type === "redeploy") {
-						await rebuildCompose({
-							composeId: job.data.composeId,
-							titleLog: job.data.titleLog,
-							descriptionLog: job.data.descriptionLog,
-						});
-					}
-				}
+			} else if (job.data.type === "deploy") {
+				await deployApplication({
+					applicationId: job.data.applicationId,
+					titleLog: job.data.titleLog,
+					descriptionLog: job.data.descriptionLog,
+				});
 			}
-		} catch (error) {
-			console.log("Error", error);
+		} else if (job.data.applicationType === "compose") {
+			await updateCompose(job.data.composeId, {
+				composeStatus: "running",
+			});
+			if (job.data.type === "deploy") {
+				await deployCompose({
+					composeId: job.data.composeId,
+					titleLog: job.data.titleLog,
+					descriptionLog: job.data.descriptionLog,
+					freshVolumes: job.data.freshVolumes,
+				});
+			} else if (job.data.type === "redeploy") {
+				await rebuildCompose({
+					composeId: job.data.composeId,
+					titleLog: job.data.titleLog,
+					descriptionLog: job.data.descriptionLog,
+					freshVolumes: job.data.freshVolumes,
+				});
+			}
+		} else if (job.data.applicationType === "application-preview") {
+			await updatePreviewDeployment(job.data.previewDeploymentId, {
+				previewStatus: "running",
+			});
+
+			if (job.data.type === "redeploy") {
+				await rebuildPreviewApplication({
+					applicationId: job.data.applicationId,
+					titleLog: job.data.titleLog,
+					descriptionLog: job.data.descriptionLog,
+					previewDeploymentId: job.data.previewDeploymentId,
+				});
+			} else if (job.data.type === "deploy") {
+				await deployPreviewApplication({
+					applicationId: job.data.applicationId,
+					titleLog: job.data.titleLog,
+					descriptionLog: job.data.descriptionLog,
+					previewDeploymentId: job.data.previewDeploymentId,
+				});
+			}
 		}
-	},
-	{
-		autorun: false,
-		connection: redisConfig,
-	},
-);
-
-export const cleanQueuesByApplication = async (applicationId: string) => {
-	const jobs = await myQueue.getJobs(["waiting", "delayed"]);
-
-	for (const job of jobs) {
-		if (job?.data?.applicationId === applicationId) {
-			await job.remove();
-			console.log(`Removed job ${job.id} for application ${applicationId}`);
-		}
-	}
-};
-
-export const cleanQueuesByCompose = async (composeId: string) => {
-	const jobs = await myQueue.getJobs(["waiting", "delayed"]);
-
-	for (const job of jobs) {
-		if (job?.data?.composeId === composeId) {
-			await job.remove();
-			console.log(`Removed job ${job.id} for compose ${composeId}`);
-		}
+	} catch (error) {
+		console.log("Error", error);
 	}
 };

@@ -1,54 +1,64 @@
-import { db } from "@/server/db";
-import { github } from "@/server/db/schema";
 import {
 	createGithub,
-	findAdminByAuthId,
-	findAuthById,
-	findUserByAuthId,
+	deriveGithubApiUrl,
+	parseGithubBaseUrl,
+	validateRequest,
 } from "@dokploy/server";
+import { db } from "@dokploy/server/db";
+import { hasPermission } from "@dokploy/server/services/permission";
 import { eq } from "drizzle-orm";
 import type { NextApiRequest, NextApiResponse } from "next";
 import { Octokit } from "octokit";
+import { github } from "@/server/db/schema";
 
 type Query = {
 	code: string;
 	state: string;
 	installation_id: string;
 	setup_action: string;
+	githubUrl?: string;
 };
 
 export default async function handler(
 	req: NextApiRequest,
 	res: NextApiResponse,
 ) {
-	const { code, state, installation_id, setup_action }: Query =
-		req.query as Query;
+	const { code, state, installation_id, githubUrl }: Query = req.query as Query;
 
 	if (!code) {
 		return res.status(400).json({ error: "Missing code parameter" });
 	}
-	const [action, value] = state?.split(":");
-	// Value could be the authId or the githubProviderId
+
+	const { user, session } = await validateRequest(req);
+	if (!user || !session?.activeOrganizationId) {
+		return res.status(401).json({ error: "Unauthorized" });
+	}
+	const ctx = {
+		user: { id: user.id },
+		session: { activeOrganizationId: session.activeOrganizationId },
+	};
+
+	const [action] = state?.split(":") ?? [];
+	if (!(await hasPermission(ctx, { gitProviders: ["create"] }))) {
+		return res.status(403).json({ error: "Forbidden" });
+	}
 
 	if (action === "gh_init") {
-		const octokit = new Octokit({});
+		// Reject before any outbound request: this runs on a GET the user can be
+		// linked into, so the host is not trusted.
+		const parsed = parseGithubBaseUrl(githubUrl);
+		if ("error" in parsed) {
+			return res.status(400).json({ error: parsed.error });
+		}
+
+		const baseUrl = parsed.url;
+		const octokit = new Octokit({ baseUrl: deriveGithubApiUrl(baseUrl) });
 		const { data } = await octokit.request(
 			"POST /app-manifests/{code}/conversions",
 			{
 				code: code as string,
 			},
 		);
-
-		const auth = await findAuthById(value as string);
-
-		let adminId = "";
-		if (auth.rol === "admin") {
-			const admin = await findAdminByAuthId(auth.id);
-			adminId = admin.adminId;
-		} else {
-			const user = await findUserByAuthId(auth.id);
-			adminId = user.adminId;
-		}
 
 		await createGithub(
 			{
@@ -59,16 +69,34 @@ export default async function handler(
 				githubClientSecret: data.client_secret,
 				githubWebhookSecret: data.webhook_secret,
 				githubPrivateKey: data.pem,
+				githubUrl: baseUrl,
 			},
-			adminId,
+			session.activeOrganizationId,
+			user.id,
 		);
 	} else if (action === "gh_setup") {
+		const githubId = state?.split(":")[1];
+		if (!githubId) {
+			return res.status(400).json({ error: "Missing github provider id" });
+		}
+
+		const provider = await db.query.github.findFirst({
+			where: eq(github.githubId, githubId),
+			with: { gitProvider: true },
+		});
+		if (
+			!provider ||
+			provider.gitProvider.organizationId !== session.activeOrganizationId
+		) {
+			return res.status(404).json({ error: "Github provider not found" });
+		}
+
 		await db
 			.update(github)
 			.set({
 				githubInstallationId: installation_id,
 			})
-			.where(eq(github.githubId, value as string))
+			.where(eq(github.githubId, githubId))
 			.returning();
 	}
 

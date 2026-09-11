@@ -1,47 +1,52 @@
-import path from "node:path";
 import type { BackupSchedule } from "@dokploy/server/services/backup";
+import {
+	createDeploymentBackup,
+	updateDeploymentStatus,
+} from "@dokploy/server/services/deployment";
+import { findDestinationById } from "@dokploy/server/services/destination";
+import { findEnvironmentById } from "@dokploy/server/services/environment";
 import type { Mariadb } from "@dokploy/server/services/mariadb";
 import { findProjectById } from "@dokploy/server/services/project";
-import {
-	getRemoteServiceContainer,
-	getServiceContainer,
-} from "../docker/utils";
 import { sendDatabaseBackupNotifications } from "../notifications/database-backup";
 import { execAsync, execAsyncRemote } from "../process/execAsync";
-import { getS3Credentials } from "./utils";
+import {
+	getBackupCommand,
+	getBackupTimestamp,
+	getS3Credentials,
+	normalizeS3Path,
+} from "./utils";
 
 export const runMariadbBackup = async (
 	mariadb: Mariadb,
 	backup: BackupSchedule,
 ) => {
-	const { appName, databasePassword, databaseUser, projectId, name } = mariadb;
-	const project = await findProjectById(projectId);
-	const { prefix, database } = backup;
-	const destination = backup.destination;
-	const backupFileName = `${new Date().toISOString()}.sql.gz`;
-	const bucketDestination = path.join(prefix, backupFileName);
-
+	const { environmentId, name, appName } = mariadb;
+	const environment = await findEnvironmentById(environmentId);
+	const project = await findProjectById(environment.projectId);
+	const { prefix } = backup;
+	const destination = await findDestinationById(backup.destinationId);
+	const backupFileName = `${getBackupTimestamp()}.sql.gz`;
+	const bucketDestination = `${appName}/${normalizeS3Path(prefix)}${backupFileName}`;
+	const deployment = await createDeploymentBackup({
+		backupId: backup.backupId,
+		title: "MariaDB Backup",
+		description: "MariaDB Backup",
+	});
 	try {
 		const rcloneFlags = getS3Credentials(destination);
 		const rcloneDestination = `:s3:${destination.bucket}/${bucketDestination}`;
-
-		const rcloneCommand = `rclone rcat ${rcloneFlags.join(" ")} "${rcloneDestination}"`;
+		const backupCommand = getBackupCommand(
+			backup,
+			rcloneFlags,
+			rcloneDestination,
+			deployment.logPath,
+		);
 		if (mariadb.serverId) {
-			const { Id: containerId } = await getRemoteServiceContainer(
-				mariadb.serverId,
-				appName,
-			);
-			const mariadbDumpCommand = `docker exec ${containerId} sh -c "mariadb-dump --user='${databaseUser}' --password='${databasePassword}' --databases ${database} | gzip"`;
-
-			await execAsyncRemote(
-				mariadb.serverId,
-				`${mariadbDumpCommand} | ${rcloneCommand}`,
-			);
+			await execAsyncRemote(mariadb.serverId, backupCommand);
 		} else {
-			const { Id: containerId } = await getServiceContainer(appName);
-			const mariadbDumpCommand = `docker exec ${containerId} sh -c "mariadb-dump --user='${databaseUser}' --password='${databasePassword}' --databases ${database} | gzip"`;
-
-			await execAsync(`${mariadbDumpCommand} | ${rcloneCommand}`);
+			await execAsync(backupCommand, {
+				shell: "/bin/bash",
+			});
 		}
 
 		await sendDatabaseBackupNotifications({
@@ -49,7 +54,10 @@ export const runMariadbBackup = async (
 			projectName: project.name,
 			databaseType: "mariadb",
 			type: "success",
+			organizationId: project.organizationId,
+			databaseName: backup.database,
 		});
+		await updateDeploymentStatus(deployment.deploymentId, "done");
 	} catch (error) {
 		console.log(error);
 		await sendDatabaseBackupNotifications({
@@ -59,7 +67,10 @@ export const runMariadbBackup = async (
 			type: "error",
 			// @ts-ignore
 			errorMessage: error?.message || "Error message not provided",
+			organizationId: project.organizationId,
+			databaseName: backup.database,
 		});
+		await updateDeploymentStatus(deployment.deploymentId, "error");
 		throw error;
 	}
 };

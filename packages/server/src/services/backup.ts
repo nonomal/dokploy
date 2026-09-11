@@ -2,24 +2,23 @@ import { db } from "@dokploy/server/db";
 import { type apiCreateBackup, backups } from "@dokploy/server/db/schema";
 import { TRPCError } from "@trpc/server";
 import { eq } from "drizzle-orm";
+import type { z } from "zod";
 
 export type Backup = typeof backups.$inferSelect;
 
 export type BackupSchedule = Awaited<ReturnType<typeof findBackupById>>;
-
-export const createBackup = async (input: typeof apiCreateBackup._type) => {
+export type BackupScheduleList = Awaited<ReturnType<typeof findBackupsByDbId>>;
+export const createBackup = async (input: z.infer<typeof apiCreateBackup>) => {
 	const newBackup = await db
 		.insert(backups)
-		.values({
-			...input,
-		})
+		.values({ ...input } as typeof backups.$inferInsert)
 		.returning()
 		.then((value) => value[0]);
 
 	if (!newBackup) {
 		throw new TRPCError({
 			code: "BAD_REQUEST",
-			message: "Error to create the Backup",
+			message: "Error creating the Backup",
 		});
 	}
 
@@ -34,7 +33,14 @@ export const findBackupById = async (backupId: string) => {
 			mysql: true,
 			mariadb: true,
 			mongo: true,
-			destination: true,
+			libsql: true,
+			destination: {
+				columns: {
+					accessKey: false,
+					secretAccessKey: false,
+				},
+			},
+			compose: true,
 		},
 	});
 	if (!backup) {
@@ -68,4 +74,27 @@ export const removeBackupById = async (backupId: string) => {
 		.returning();
 
 	return result[0];
+};
+
+export const findBackupsByDbId = async (
+	id: string,
+	type: "postgres" | "mysql" | "mariadb" | "mongo" | "libsql",
+) => {
+	const result = await db.query.backups.findMany({
+		where: eq(backups[`${type}Id`], id),
+		with: {
+			postgres: true,
+			mysql: true,
+			mariadb: true,
+			mongo: true,
+			libsql: true,
+			destination: {
+				columns: {
+					accessKey: false,
+					secretAccessKey: false,
+				},
+			},
+		},
+	});
+	return result || [];
 };

@@ -17,7 +17,7 @@ export const initializePostgres = async () => {
 				Mounts: [
 					{
 						Type: "volume",
-						Source: "dokploy-postgres-database",
+						Source: "dokploy-postgres",
 						Target: "/var/lib/postgresql/data",
 					},
 				],
@@ -32,16 +32,18 @@ export const initializePostgres = async () => {
 				Replicas: 1,
 			},
 		},
-		EndpointSpec: {
-			Ports: [
-				{
-					TargetPort: 5432,
-					PublishedPort: process.env.NODE_ENV === "development" ? 5432 : 0,
-					Protocol: "tcp",
-					PublishMode: "host",
-				},
-			],
-		},
+		...(process.env.NODE_ENV === "development" && {
+			EndpointSpec: {
+				Ports: [
+					{
+						TargetPort: 5432,
+						PublishedPort: 5432,
+						Protocol: "tcp",
+						PublishMode: "host",
+					},
+				],
+			},
+		}),
 	};
 	try {
 		await pullImage(imageName);
@@ -52,10 +54,16 @@ export const initializePostgres = async () => {
 			version: Number.parseInt(inspect.Version.Index),
 			...settings,
 		});
-
 		console.log("Postgres Started ✅");
-	} catch (error) {
-		await docker.createService(settings);
+	} catch (_) {
+		try {
+			await docker.createService(settings);
+		} catch (error: any) {
+			if (error?.statusCode !== 409) {
+				throw error;
+			}
+			console.log("Postgres service already exists, continuing...");
+		}
 		console.log("Postgres Not Found: Starting ✅");
 	}
 };

@@ -1,157 +1,159 @@
-import { findAdmin } from "@dokploy/server/services/admin";
+import { CLEANUP_CRON_JOB } from "@dokploy/server/constants";
+import { member } from "@dokploy/server/db/schema";
+import type { BackupSchedule } from "@dokploy/server/services/backup";
+import { findDestinationById } from "@dokploy/server/services/destination";
 import { getAllServers } from "@dokploy/server/services/server";
+import { getWebServerSettings } from "@dokploy/server/services/web-server-settings";
+import { eq } from "drizzle-orm";
 import { scheduleJob } from "node-schedule";
 import { db } from "../../db/index";
-import {
-	cleanUpDockerBuilder,
-	cleanUpSystemPrune,
-	cleanUpUnusedImages,
-} from "../docker/utils";
-import { runMariadbBackup } from "./mariadb";
-import { runMongoBackup } from "./mongo";
-import { runMySqlBackup } from "./mysql";
-import { runPostgresBackup } from "./postgres";
+import { startLogCleanup } from "../access-log/handler";
+import { cleanupAll } from "../docker/utils";
+import { sendDockerCleanupNotifications } from "../notifications/docker-cleanup";
+import { execAsync, execAsyncRemote } from "../process/execAsync";
+import { redactRcloneCredentials } from "./redact";
+import { getS3Credentials, normalizeS3Path, scheduleBackup } from "./utils";
 
 export const initCronJobs = async () => {
 	console.log("Setting up cron jobs....");
 
-	const admin = await findAdmin();
+	const admin = await db.query.member.findFirst({
+		where: eq(member.role, "owner"),
+		with: {
+			user: true,
+		},
+	});
 
-	if (admin?.enableDockerCleanup) {
-		scheduleJob("docker-cleanup", "0 0 * * *", async () => {
-			console.log(
-				`Docker Cleanup ${new Date().toLocaleString()}]  Running docker cleanup`,
-			);
-			await cleanUpUnusedImages();
-			await cleanUpDockerBuilder();
-			await cleanUpSystemPrune();
-		});
+	if (!admin) {
+		return;
+	}
+
+	const webServerSettings = await getWebServerSettings();
+
+	if (webServerSettings?.enableDockerCleanup) {
+		try {
+			scheduleJob("docker-cleanup", CLEANUP_CRON_JOB, async () => {
+				console.log(
+					`Docker Cleanup ${new Date().toLocaleString()}]  Running docker cleanup`,
+				);
+
+				await cleanupAll();
+
+				await sendDockerCleanupNotifications(admin.user.id);
+			});
+		} catch (error) {
+			console.error("[Backup] Docker Cleanup Error", error);
+		}
 	}
 
 	const servers = await getAllServers();
 
 	for (const server of servers) {
-		const { appName, serverId } = server;
-		if (serverId) {
-			scheduleJob(serverId, "0 0 * * *", async () => {
+		const { serverId, enableDockerCleanup, name } = server;
+		if (enableDockerCleanup) {
+			try {
+				scheduleJob(serverId, CLEANUP_CRON_JOB, async () => {
+					console.log(
+						`SERVER-BACKUP[${new Date().toLocaleString()}] Running Cleanup ${name}`,
+					);
+
+					await cleanupAll(serverId);
+
+					await sendDockerCleanupNotifications(
+						admin.user.id,
+						`Docker cleanup for Server ${name} (${serverId})`,
+					);
+				});
+			} catch (error) {
+				console.error(`[Backup] ${error}`);
+			}
+		}
+	}
+
+	const backups = await db.query.backups.findMany({
+		with: {
+			destination: true,
+			postgres: true,
+			mariadb: true,
+			mysql: true,
+			mongo: true,
+			libsql: true,
+			user: true,
+			compose: true,
+		},
+	});
+
+	for (const backup of backups) {
+		try {
+			if (backup.enabled) {
+				scheduleBackup(backup);
 				console.log(
-					`SERVER-BACKUP[${new Date().toLocaleString()}] Running Cleanup ${appName}`,
+					`[Backup] ${backup.databaseType} Enabled with cron: [${backup.schedule}]`,
 				);
-				await cleanUpUnusedImages(serverId);
-				await cleanUpDockerBuilder(serverId);
-				await cleanUpSystemPrune(serverId);
-			});
+			}
+		} catch (error) {
+			console.error(`[Backup] ${backup.databaseType} Error`, error);
 		}
 	}
 
-	const pgs = await db.query.postgres.findMany({
-		with: {
-			backups: {
-				with: {
-					destination: true,
-					postgres: true,
-					mariadb: true,
-					mysql: true,
-					mongo: true,
-				},
-			},
-		},
-	});
-	for (const pg of pgs) {
-		for (const backup of pg.backups) {
-			const { schedule, backupId, enabled } = backup;
-			if (enabled) {
-				scheduleJob(backupId, schedule, async () => {
-					console.log(
-						`PG-SERVER[${new Date().toLocaleString()}] Running Backup ${backupId}`,
-					);
-					runPostgresBackup(pg, backup);
-				});
-			}
+	if (webServerSettings?.logCleanupCron) {
+		try {
+			console.log(
+				"Starting log requests cleanup",
+				webServerSettings.logCleanupCron,
+			);
+			await startLogCleanup(webServerSettings.logCleanupCron);
+		} catch (error) {
+			console.error("[Backup] Log Cleanup Error", error);
 		}
 	}
+};
 
-	const mariadbs = await db.query.mariadb.findMany({
-		with: {
-			backups: {
-				with: {
-					destination: true,
-					postgres: true,
-					mariadb: true,
-					mysql: true,
-					mongo: true,
-				},
-			},
-		},
-	});
-
-	for (const maria of mariadbs) {
-		for (const backup of maria.backups) {
-			const { schedule, backupId, enabled } = backup;
-			if (enabled) {
-				scheduleJob(backupId, schedule, async () => {
-					console.log(
-						`MARIADB-SERVER[${new Date().toLocaleString()}] Running Backup ${backupId}`,
-					);
-					await runMariadbBackup(maria, backup);
-				});
-			}
-		}
+const getServiceAppName = (backup: BackupSchedule): string => {
+	if (backup.compose?.appName) {
+		return backup.serviceName
+			? `${backup.compose.appName}_${backup.serviceName}`
+			: backup.compose.appName;
 	}
+	const serviceAppName =
+		backup.postgres?.appName ||
+		backup.mysql?.appName ||
+		backup.mariadb?.appName ||
+		backup.mongo?.appName ||
+		backup.libsql?.appName;
+	return serviceAppName || backup.appName;
+};
 
-	const mongodbs = await db.query.mongo.findMany({
-		with: {
-			backups: {
-				with: {
-					destination: true,
-					postgres: true,
-					mariadb: true,
-					mysql: true,
-					mongo: true,
-				},
-			},
-		},
-	});
+export const keepLatestNBackups = async (
+	backup: BackupSchedule,
+	serverId?: string | null,
+) => {
+	// 0 also immediately returns which is good as the empty "keep latest" field in the UI
+	// is saved as 0 in the database
+	if (!backup.keepLatestCount) return;
 
-	for (const mongo of mongodbs) {
-		for (const backup of mongo.backups) {
-			const { schedule, backupId, enabled } = backup;
-			if (enabled) {
-				scheduleJob(backupId, schedule, async () => {
-					console.log(
-						`MONGO-SERVER[${new Date().toLocaleString()}] Running Backup ${backupId}`,
-					);
-					await runMongoBackup(mongo, backup);
-				});
-			}
+	try {
+		const destination = await findDestinationById(backup.destinationId);
+		const rcloneFlags = getS3Credentials(destination);
+		const appName = getServiceAppName(backup);
+		const backupFilesPath = `:s3:${destination.bucket}/${appName}/${normalizeS3Path(backup.prefix)}`;
+
+		// --include "*.bson.gz" or "*.sql.gz" or "*.zip" ensures nothing else other than the dokploy backup files are touched by rclone
+		const rcloneList = `rclone lsf ${rcloneFlags.join(" ")} --include "*${backup.databaseType === "web-server" ? ".zip" : ".{sql.gz,bson.gz}"}" ${backupFilesPath}`;
+		// when we pipe the above command with this one, we only get the list of files we want to delete
+		const sortAndPickUnwantedBackups = `sort -r | tail -n +$((${backup.keepLatestCount}+1)) | xargs -I{}`;
+		// this command deletes the files
+		// to test the deletion before actually deleting we can add --dry-run before ${backupFilesPath}{}
+		const rcloneDelete = `rclone delete ${rcloneFlags.join(" ")} ${backupFilesPath}{}`;
+
+		const rcloneCommand = `${rcloneList} | ${sortAndPickUnwantedBackups} ${rcloneDelete}`;
+
+		if (serverId) {
+			await execAsyncRemote(serverId, rcloneCommand);
+		} else {
+			await execAsync(rcloneCommand);
 		}
-	}
-
-	const mysqls = await db.query.mysql.findMany({
-		with: {
-			backups: {
-				with: {
-					destination: true,
-					postgres: true,
-					mariadb: true,
-					mysql: true,
-					mongo: true,
-				},
-			},
-		},
-	});
-
-	for (const mysql of mysqls) {
-		for (const backup of mysql.backups) {
-			const { schedule, backupId, enabled } = backup;
-			if (enabled) {
-				scheduleJob(backupId, schedule, async () => {
-					console.log(
-						`MYSQL-SERVER[${new Date().toLocaleString()}] Running Backup ${backupId}`,
-					);
-					await runMySqlBackup(mysql, backup);
-				});
-			}
-		}
+	} catch (error) {
+		console.error(redactRcloneCredentials(String(error)));
 	}
 };

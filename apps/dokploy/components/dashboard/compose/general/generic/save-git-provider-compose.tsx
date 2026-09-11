@@ -1,3 +1,14 @@
+import { VALID_BRANCH_REGEX } from "@dokploy/server/utils/git-branch-validation";
+import { standardSchemaResolver as zodResolver } from "@hookform/resolvers/standard-schema";
+import { HelpCircle, KeyRoundIcon, LockIcon, X } from "lucide-react";
+import Link from "next/link";
+import { useRouter } from "next/router";
+import { useEffect } from "react";
+import { useForm } from "react-hook-form";
+import { toast } from "sonner";
+import { z } from "zod";
+import { GitIcon } from "@/components/icons/data-tools-icons";
+import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
 	Form,
@@ -17,22 +28,27 @@ import {
 	SelectTrigger,
 	SelectValue,
 } from "@/components/ui/select";
+import { Switch } from "@/components/ui/switch";
+import {
+	Tooltip,
+	TooltipContent,
+	TooltipProvider,
+	TooltipTrigger,
+} from "@/components/ui/tooltip";
 import { api } from "@/utils/api";
-import { zodResolver } from "@hookform/resolvers/zod";
-import { KeyRoundIcon, LockIcon } from "lucide-react";
-import { useRouter } from "next/router";
-import { useEffect } from "react";
-import { useForm } from "react-hook-form";
-import { toast } from "sonner";
-import { z } from "zod";
 
 const GitProviderSchema = z.object({
 	composePath: z.string().min(1),
 	repositoryURL: z.string().min(1, {
 		message: "Repository URL is required",
 	}),
-	branch: z.string().min(1, "Branch required"),
+	branch: z
+		.string()
+		.min(1, "Branch required")
+		.regex(VALID_BRANCH_REGEX, "Invalid branch name"),
 	sshKey: z.string().optional(),
+	watchPaths: z.array(z.string()).optional(),
+	enableSubmodules: z.boolean().default(false),
 });
 
 type GitProvider = z.infer<typeof GitProviderSchema>;
@@ -43,17 +59,19 @@ interface Props {
 
 export const SaveGitProviderCompose = ({ composeId }: Props) => {
 	const { data, refetch } = api.compose.one.useQuery({ composeId });
-	const { data: sshKeys } = api.sshKey.all.useQuery();
+	const { data: sshKeys } = api.sshKey.allForApps.useQuery();
 	const router = useRouter();
 
-	const { mutateAsync, isLoading } = api.compose.update.useMutation();
+	const { mutateAsync, isPending } = api.compose.update.useMutation();
 
-	const form = useForm<GitProvider>({
+	const form = useForm({
 		defaultValues: {
 			branch: "",
 			repositoryURL: "",
 			composePath: "./docker-compose.yml",
 			sshKey: undefined,
+			watchPaths: [],
+			enableSubmodules: false,
 		},
 		resolver: zodResolver(GitProviderSchema),
 	});
@@ -65,6 +83,8 @@ export const SaveGitProviderCompose = ({ composeId }: Props) => {
 				branch: data.customGitBranch || "",
 				repositoryURL: data.customGitUrl || "",
 				composePath: data.composePath,
+				watchPaths: data.watchPaths || [],
+				enableSubmodules: data.enableSubmodules ?? false,
 			});
 		}
 	}, [form.reset, data, form]);
@@ -77,13 +97,16 @@ export const SaveGitProviderCompose = ({ composeId }: Props) => {
 			composeId,
 			sourceType: "git",
 			composePath: values.composePath,
+			composeStatus: "idle",
+			watchPaths: values.watchPaths || [],
+			enableSubmodules: values.enableSubmodules,
 		})
 			.then(async () => {
 				toast.success("Git Provider Saved");
 				await refetch();
 			})
 			.catch(() => {
-				toast.error("Error to save the Git provider");
+				toast.error("Error saving the Git provider");
 			});
 	};
 
@@ -101,11 +124,22 @@ export const SaveGitProviderCompose = ({ composeId }: Props) => {
 								name="repositoryURL"
 								render={({ field }) => (
 									<FormItem>
-										<FormLabel className="flex flex-row justify-between">
-											Repository URL
-										</FormLabel>
+										<div className="flex items-center justify-between">
+											<FormLabel>Repository URL</FormLabel>
+											{field.value?.startsWith("https://") && (
+												<Link
+													href={field.value}
+													target="_blank"
+													rel="noopener noreferrer"
+													className="flex items-center gap-1 text-sm text-muted-foreground hover:text-primary"
+												>
+													<GitIcon className="h-4 w-4" />
+													<span>View Repository</span>
+												</Link>
+											)}
+										</div>
 										<FormControl>
-											<Input placeholder="git@bitbucket.org" {...field} />
+											<Input placeholder="Repository URL" {...field} />
 										</FormControl>
 										<FormMessage />
 									</FormItem>
@@ -191,10 +225,106 @@ export const SaveGitProviderCompose = ({ composeId }: Props) => {
 							</FormItem>
 						)}
 					/>
+					<FormField
+						control={form.control}
+						name="watchPaths"
+						render={({ field }) => (
+							<FormItem className="md:col-span-2">
+								<div className="flex items-center gap-2">
+									<FormLabel>Watch Paths</FormLabel>
+									<TooltipProvider>
+										<Tooltip>
+											<TooltipTrigger asChild>
+												<HelpCircle className="size-4 text-muted-foreground hover:text-foreground transition-colors cursor-pointer" />
+											</TooltipTrigger>
+											<TooltipContent className="max-w-[300px]">
+												<p>
+													Add paths to watch for changes. When files in these
+													paths change, a new deployment will be triggered. This
+													will work only when manual webhook is setup.
+												</p>
+											</TooltipContent>
+										</Tooltip>
+									</TooltipProvider>
+								</div>
+								<div className="flex flex-wrap gap-2 mb-2">
+									{field.value?.map((path, index) => (
+										<Badge key={index} variant="secondary">
+											{path}
+											<button
+												type="button"
+												aria-label="Remove watch path"
+												className="inline-flex items-center focus-visible:ring-2"
+												onClick={() => {
+													const newPaths = [...(field.value || [])];
+													newPaths.splice(index, 1);
+													form.setValue("watchPaths", newPaths);
+												}}
+											>
+												<X className="ml-1 size-3 cursor-pointer" />
+											</button>
+										</Badge>
+									))}
+								</div>
+								<FormControl>
+									<div className="flex gap-2">
+										<Input
+											placeholder="Enter a path to watch (e.g., src/**, dist/*.js)"
+											onKeyDown={(e) => {
+												if (e.key === "Enter") {
+													e.preventDefault();
+													const input = e.currentTarget;
+													const value = input.value.trim();
+													if (value) {
+														const newPaths = [...(field.value || []), value];
+														form.setValue("watchPaths", newPaths);
+														input.value = "";
+													}
+												}
+											}}
+										/>
+										<Button
+											type="button"
+											variant="secondary"
+											onClick={() => {
+												const input = document.querySelector(
+													'input[placeholder="Enter a path to watch (e.g., src/**, dist/*.js)"]',
+												) as HTMLInputElement;
+												const value = input.value.trim();
+												if (value) {
+													const newPaths = [...(field.value || []), value];
+													form.setValue("watchPaths", newPaths);
+													input.value = "";
+												}
+											}}
+										>
+											Add
+										</Button>
+									</div>
+								</FormControl>
+								<FormMessage />
+							</FormItem>
+						)}
+					/>
+					<FormField
+						control={form.control}
+						name="enableSubmodules"
+						render={({ field }) => (
+							<FormItem className="flex flex-row items-center space-x-2 space-y-0">
+								<FormControl>
+									<Switch
+										checked={field.value}
+										onCheckedChange={field.onChange}
+									/>
+								</FormControl>
+								<FormLabel>Enable Submodules</FormLabel>
+							</FormItem>
+						)}
+					/>
 				</div>
 
 				<div className="flex flex-row justify-end">
-					<Button type="submit" className="w-fit" isLoading={isLoading}>
+					<Button type="submit" className="w-fit" isLoading={isPending}>
 						Save{" "}
 					</Button>
 				</div>

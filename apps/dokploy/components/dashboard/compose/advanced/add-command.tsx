@@ -1,3 +1,9 @@
+import { standardSchemaResolver as zodResolver } from "@hookform/resolvers/standard-schema";
+import { useEffect } from "react";
+import { useForm } from "react-hook-form";
+import { toast } from "sonner";
+import { z } from "zod";
+import { AlertBlock } from "@/components/shared/alert-block";
 import { Button } from "@/components/ui/button";
 import {
 	Card,
@@ -16,19 +22,16 @@ import {
 	FormMessage,
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
+import { Switch } from "@/components/ui/switch";
 import { api } from "@/utils/api";
-import { zodResolver } from "@hookform/resolvers/zod";
-import React from "react";
-import { useEffect } from "react";
-import { useForm } from "react-hook-form";
-import { toast } from "sonner";
-import { z } from "zod";
+
 interface Props {
 	composeId: string;
 }
 
 const AddRedirectSchema = z.object({
 	command: z.string(),
+	pullImages: z.boolean(),
 });
 
 type AddCommand = z.infer<typeof AddRedirectSchema>;
@@ -51,27 +54,30 @@ export const AddCommandCompose = ({ composeId }: Props) => {
 
 	const utils = api.useUtils();
 
-	const { mutateAsync, isLoading } = api.compose.update.useMutation();
+	const { mutateAsync, isPending } = api.compose.update.useMutation();
 
 	const form = useForm<AddCommand>({
 		defaultValues: {
 			command: "",
+			pullImages: false,
 		},
 		resolver: zodResolver(AddRedirectSchema),
 	});
 
 	useEffect(() => {
-		if (data?.command) {
+		if (data) {
 			form.reset({
-				command: data?.command || "",
+				command: data.command || "",
+				pullImages: data.pullImages ?? false,
 			});
 		}
-	}, [form, form.reset, form.formState.isSubmitSuccessful, data?.command]);
+	}, [form, form.reset, form.formState.isSubmitSuccessful, data]);
 
-	const onSubmit = async (data: AddCommand) => {
+	const onSubmit = async (formData: AddCommand) => {
 		await mutateAsync({
 			composeId,
-			command: data?.command,
+			command: formData.command,
+			pullImages: formData.pullImages,
 		})
 			.then(async () => {
 				toast.success("Command Updated");
@@ -81,7 +87,7 @@ export const AddCommandCompose = ({ composeId }: Props) => {
 				});
 			})
 			.catch(() => {
-				toast.error("Error to update the command");
+				toast.error("Error updating the command");
 			});
 	};
 
@@ -91,7 +97,7 @@ export const AddCommandCompose = ({ composeId }: Props) => {
 				<div>
 					<CardTitle className="text-xl">Run Command</CardTitle>
 					<CardDescription>
-						Append a custom command to the compose file
+						Override a custom command to the compose file
 					</CardDescription>
 				</div>
 			</CardHeader>
@@ -101,7 +107,37 @@ export const AddCommandCompose = ({ composeId }: Props) => {
 						onSubmit={form.handleSubmit(onSubmit)}
 						className="grid w-full gap-4"
 					>
+						<AlertBlock type="warning">
+							Modifying the default command may affect deployment stability,
+							impacting logs and monitoring. Proceed carefully and test
+							thoroughly. By default, the command starts with{" "}
+							<strong>docker</strong>.
+						</AlertBlock>
 						<div className="flex flex-col gap-4">
+							{data?.composeType === "docker-compose" && (
+								<FormField
+									control={form.control}
+									name="pullImages"
+									render={({ field }) => (
+										<FormItem className="flex flex-row items-center justify-between rounded-lg border p-3 shadow-xs">
+											<div className="space-y-0.5">
+												<FormLabel>Pull latest images on deploy</FormLabel>
+												<FormDescription>
+													Adds <strong>--pull always</strong> to the default
+													command so every deploy fetches the newest image for
+													each tag. Has no effect when a custom command is set.
+												</FormDescription>
+											</div>
+											<FormControl>
+												<Switch
+													checked={field.value}
+													onCheckedChange={field.onChange}
+												/>
+											</FormControl>
+										</FormItem>
+									)}
+								/>
+							)}
 							<FormField
 								control={form.control}
 								name="command"
@@ -121,7 +157,7 @@ export const AddCommandCompose = ({ composeId }: Props) => {
 							/>
 						</div>
 						<div className="flex justify-end">
-							<Button isLoading={isLoading} type="submit" className="w-fit">
+							<Button isLoading={isPending} type="submit" className="w-fit">
 								Save
 							</Button>
 						</div>

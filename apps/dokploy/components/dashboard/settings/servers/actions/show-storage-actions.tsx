@@ -1,6 +1,5 @@
+import { toast } from "sonner";
 import { Button } from "@/components/ui/button";
-import React from "react";
-
 import {
 	DropdownMenu,
 	DropdownMenuContent,
@@ -11,36 +10,38 @@ import {
 	DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { api } from "@/utils/api";
-import { toast } from "sonner";
 
 interface Props {
 	serverId?: string;
 }
 export const ShowStorageActions = ({ serverId }: Props) => {
-	const { mutateAsync: cleanAll, isLoading: cleanAllIsLoading } =
+	const { mutateAsync: cleanAll, isPending: cleanAllIsLoading } =
 		api.settings.cleanAll.useMutation();
 
 	const {
 		mutateAsync: cleanDockerBuilder,
-		isLoading: cleanDockerBuilderIsLoading,
+		isPending: cleanDockerBuilderIsPending,
 	} = api.settings.cleanDockerBuilder.useMutation();
 
-	const { mutateAsync: cleanMonitoring, isLoading: cleanMonitoringIsLoading } =
+	const { mutateAsync: cleanMonitoring } =
 		api.settings.cleanMonitoring.useMutation();
 	const {
 		mutateAsync: cleanUnusedImages,
-		isLoading: cleanUnusedImagesIsLoading,
+		isPending: cleanUnusedImagesIsPending,
 	} = api.settings.cleanUnusedImages.useMutation();
 
 	const {
 		mutateAsync: cleanUnusedVolumes,
-		isLoading: cleanUnusedVolumesIsLoading,
+		isPending: cleanUnusedVolumesIsPending,
 	} = api.settings.cleanUnusedVolumes.useMutation();
 
 	const {
 		mutateAsync: cleanStoppedContainers,
-		isLoading: cleanStoppedContainersIsLoading,
+		isPending: cleanStoppedContainersIsPending,
 	} = api.settings.cleanStoppedContainers.useMutation();
+
+	const { mutateAsync: cleanPatchRepos, isPending: cleanPatchReposIsLoading } =
+		api.patch.cleanPatchRepos.useMutation();
 
 	return (
 		<DropdownMenu>
@@ -48,19 +49,21 @@ export const ShowStorageActions = ({ serverId }: Props) => {
 				asChild
 				disabled={
 					cleanAllIsLoading ||
-					cleanDockerBuilderIsLoading ||
-					cleanUnusedImagesIsLoading ||
-					cleanUnusedVolumesIsLoading ||
-					cleanStoppedContainersIsLoading
+					cleanDockerBuilderIsPending ||
+					cleanUnusedImagesIsPending ||
+					cleanUnusedVolumesIsPending ||
+					cleanStoppedContainersIsPending ||
+					cleanPatchReposIsLoading
 				}
 			>
 				<Button
 					isLoading={
 						cleanAllIsLoading ||
-						cleanDockerBuilderIsLoading ||
-						cleanUnusedImagesIsLoading ||
-						cleanUnusedVolumesIsLoading ||
-						cleanStoppedContainersIsLoading
+						cleanDockerBuilderIsPending ||
+						cleanUnusedImagesIsPending ||
+						cleanUnusedVolumesIsPending ||
+						cleanStoppedContainersIsPending ||
+						cleanPatchReposIsLoading
 					}
 					variant="outline"
 				>
@@ -81,7 +84,7 @@ export const ShowStorageActions = ({ serverId }: Props) => {
 									toast.success("Cleaned images");
 								})
 								.catch(() => {
-									toast.error("Error to clean images");
+									toast.error("Error cleaning images");
 								});
 						}}
 					>
@@ -97,7 +100,7 @@ export const ShowStorageActions = ({ serverId }: Props) => {
 									toast.success("Cleaned volumes");
 								})
 								.catch(() => {
-									toast.error("Error to clean volumes");
+									toast.error("Error cleaning volumes");
 								});
 						}}
 					>
@@ -114,11 +117,28 @@ export const ShowStorageActions = ({ serverId }: Props) => {
 									toast.success("Stopped containers cleaned");
 								})
 								.catch(() => {
-									toast.error("Error to clean stopped containers");
+									toast.error("Error cleaning stopped containers");
 								});
 						}}
 					>
 						<span>Clean stopped containers</span>
+					</DropdownMenuItem>
+
+					<DropdownMenuItem
+						className="w-full cursor-pointer"
+						onClick={async () => {
+							await cleanPatchRepos({
+								serverId: serverId,
+							})
+								.then(async () => {
+									toast.success("Cleaned Patch Caches");
+								})
+								.catch(() => {
+									toast.error("Error cleaning Patch Caches");
+								});
+						}}
+					>
+						<span>Clean Patch Caches</span>
 					</DropdownMenuItem>
 
 					<DropdownMenuItem
@@ -131,7 +151,7 @@ export const ShowStorageActions = ({ serverId }: Props) => {
 									toast.success("Cleaned Docker Builder");
 								})
 								.catch(() => {
-									toast.error("Error to clean Docker Builder");
+									toast.error("Error cleaning Docker Builder");
 								});
 						}}
 					>
@@ -146,11 +166,11 @@ export const ShowStorageActions = ({ serverId }: Props) => {
 										toast.success("Cleaned Monitoring");
 									})
 									.catch(() => {
-										toast.error("Error to clean Monitoring");
+										toast.error("Error cleaning Monitoring");
 									});
 							}}
 						>
-							<span>Clean Monitoring </span>
+							<span>Clean Monitoring</span>
 						</DropdownMenuItem>
 					)}
 
@@ -161,10 +181,10 @@ export const ShowStorageActions = ({ serverId }: Props) => {
 								serverId: serverId,
 							})
 								.then(async () => {
-									toast.success("Cleaned all");
+									toast.success("Cleaning in progress... Please wait");
 								})
 								.catch(() => {
-									toast.error("Error to clean all");
+									toast.error("Error cleaning all");
 								});
 						}}
 					>

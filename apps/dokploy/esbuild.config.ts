@@ -1,6 +1,5 @@
-import esbuild from "esbuild";
-
 import dotenv, { type DotenvParseOutput } from "dotenv";
+import esbuild from "esbuild";
 
 const result = dotenv.config({ path: ".env.production" });
 
@@ -8,6 +7,10 @@ function prepareDefine(config: DotenvParseOutput | undefined) {
 	const define = {};
 	// @ts-ignore
 	for (const [key, value] of Object.entries(config)) {
+		// Skip DATABASE_URL to allow runtime environment variable override
+		if (key === "DATABASE_URL") {
+			continue;
+		}
 		// @ts-ignore
 		define[`process.env.${key}`] = JSON.stringify(value);
 	}
@@ -15,12 +18,17 @@ function prepareDefine(config: DotenvParseOutput | undefined) {
 }
 
 const define = prepareDefine(result.parsed);
+
 try {
 	esbuild
 		.build({
 			entryPoints: {
 				server: "server/server.ts",
+				migration: "migration.ts",
+				"wait-for-postgres": "wait-for-postgres.ts",
 				"reset-password": "reset-password.ts",
+				"reset-2fa": "reset-2fa.ts",
+				"migrate-auth-secret": "scripts/migrate-auth-secret.ts",
 			},
 			bundle: true,
 			platform: "node",

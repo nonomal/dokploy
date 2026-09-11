@@ -1,12 +1,14 @@
-import { Badge } from "@/components/ui/badge";
-import { Button } from "@/components/ui/button";
 import type { ColumnDef } from "@tanstack/react-table";
 import { format } from "date-fns";
 import { ArrowUpDown } from "lucide-react";
-import * as React from "react";
+import { Badge } from "@/components/ui/badge";
+import { Button } from "@/components/ui/button";
 import type { LogEntry } from "./show-requests";
 
 export const getStatusColor = (status: number) => {
+	if (status === 0) {
+		return "secondary";
+	}
 	if (status >= 100 && status < 200) {
 		return "outline";
 	}
@@ -22,10 +24,28 @@ export const getStatusColor = (status: number) => {
 	return "destructive";
 };
 
+const formatStatusLabel = (status: number) => {
+	if (status === 0) {
+		return "N/A";
+	}
+	return status;
+};
+
+const formatDuration = (nanos: number) => {
+	const ms = nanos / 1000000;
+	if (ms < 1) {
+		return `${(nanos / 1000).toFixed(2)} µs`;
+	}
+	if (ms < 1000) {
+		return `${ms.toFixed(2)} ms`;
+	}
+	return `${(ms / 1000).toFixed(2)} s`;
+};
+
 export const columns: ColumnDef<LogEntry>[] = [
 	{
 		accessorKey: "level",
-		header: ({ column }) => {
+		header: () => {
 			return <Button variant="ghost">Level</Button>;
 		},
 		cell: ({ row }) => {
@@ -48,19 +68,23 @@ export const columns: ColumnDef<LogEntry>[] = [
 		cell: ({ row }) => {
 			const log = row.original;
 			return (
-				<div className=" flex flex-col gap-2">
-					<div className="flex flex-row gap-3 ">
+				<div className="flex flex-col gap-2">
+					<div className="flex items-center flex-row flex-wrap gap-3 ">
 						{log.RequestMethod}{" "}
-						{log.RequestPath.length > 100
-							? `${log.RequestPath.slice(0, 82)}...`
-							: log.RequestPath}
+						<div className="inline-flex items-center gap-2 bg-muted px-1.5 py-1 rounded-lg">
+							<span>{log.RequestAddr}</span>
+						</div>
+						<span className="break-all">{log.RequestPath}</span>
 					</div>
 					<div className="flex flex-row gap-3 w-full">
-						<Badge variant={getStatusColor(log.OriginStatus)}>
-							Status: {log.OriginStatus}
+						<Badge
+							variant={getStatusColor(log.OriginStatus || log.DownstreamStatus)}
+						>
+							Status:{" "}
+							{formatStatusLabel(log.OriginStatus || log.DownstreamStatus)}
 						</Badge>
 						<Badge variant={"secondary"}>
-							Exec Time: {`${log.Duration / 1000000000}s`}
+							Exec Time: {formatDuration(log.Duration)}
 						</Badge>
 						<Badge variant={"secondary"}>IP: {log.ClientAddr}</Badge>
 					</div>
@@ -84,7 +108,7 @@ export const columns: ColumnDef<LogEntry>[] = [
 		cell: ({ row }) => {
 			const log = row.original;
 			return (
-				<div className=" flex flex-col gap-2">
+				<div className="flex flex-col gap-2">
 					<div className="flex flex-row gap-3 w-full">
 						{format(new Date(log.StartUTC), "yyyy-MM-dd HH:mm:ss")}
 					</div>

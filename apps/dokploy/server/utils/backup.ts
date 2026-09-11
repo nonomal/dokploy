@@ -1,3 +1,9 @@
+import {
+	type BackupScheduleList,
+	IS_CLOUD,
+	removeScheduleBackup,
+} from "@dokploy/server/index";
+
 type QueueJob =
 	| {
 			type: "backup";
@@ -8,6 +14,17 @@ type QueueJob =
 			type: "server";
 			cronSchedule: string;
 			serverId: string;
+	  }
+	| {
+			type: "schedule";
+			cronSchedule: string;
+			scheduleId: string;
+			timezone?: string | null;
+	  }
+	| {
+			type: "volume-backup";
+			cronSchedule: string;
+			volumeBackupId: string;
 	  };
 export const schedule = async (job: QueueJob) => {
 	try {
@@ -20,10 +37,8 @@ export const schedule = async (job: QueueJob) => {
 			body: JSON.stringify(job),
 		});
 		const data = await result.json();
-		console.log(data);
 		return data;
 	} catch (error) {
-		console.log(error);
 		throw error;
 	}
 };
@@ -39,10 +54,8 @@ export const removeJob = async (job: QueueJob) => {
 			body: JSON.stringify(job),
 		});
 		const data = await result.json();
-		console.log(data);
 		return data;
 	} catch (error) {
-		console.log(error);
 		throw error;
 	}
 };
@@ -58,10 +71,24 @@ export const updateJob = async (job: QueueJob) => {
 			body: JSON.stringify(job),
 		});
 		const data = await result.json();
-		console.log(data);
 		return data;
 	} catch (error) {
-		console.log(error);
 		throw error;
+	}
+};
+
+export const cancelJobs = async (backups: BackupScheduleList) => {
+	for (const backup of backups) {
+		if (backup.enabled) {
+			if (IS_CLOUD) {
+				await removeJob({
+					cronSchedule: backup.schedule,
+					backupId: backup.backupId,
+					type: "backup",
+				});
+			} else {
+				removeScheduleBackup(backup.backupId);
+			}
+		}
 	}
 };

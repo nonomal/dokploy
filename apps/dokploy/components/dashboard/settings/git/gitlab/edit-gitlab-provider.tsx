@@ -1,3 +1,9 @@
+import { standardSchemaResolver as zodResolver } from "@hookform/resolvers/standard-schema";
+import { PenBoxIcon } from "lucide-react";
+import { useEffect, useState } from "react";
+import { useForm } from "react-hook-form";
+import { toast } from "sonner";
+import { z } from "zod";
 import { GitlabIcon } from "@/components/icons/data-tools-icons";
 import { AlertBlock } from "@/components/shared/alert-block";
 import { Button } from "@/components/ui/button";
@@ -12,6 +18,7 @@ import {
 import {
 	Form,
 	FormControl,
+	FormDescription,
 	FormField,
 	FormItem,
 	FormLabel,
@@ -19,17 +26,18 @@ import {
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { api } from "@/utils/api";
-import { zodResolver } from "@hookform/resolvers/zod";
-import { Edit } from "lucide-react";
-import { useEffect, useState } from "react";
-import { useForm } from "react-hook-form";
-import { toast } from "sonner";
-import { z } from "zod";
 
 const Schema = z.object({
 	name: z.string().min(1, {
 		message: "Name is required",
 	}),
+	gitlabUrl: z.string().url({
+		message: "Invalid Gitlab URL",
+	}),
+	gitlabInternalUrl: z
+		.union([z.string().url(), z.literal("")])
+		.optional()
+		.transform((v) => (v === "" ? undefined : v)),
 	groupName: z.string().optional(),
 });
 
@@ -40,7 +48,7 @@ interface Props {
 }
 
 export const EditGitlabProvider = ({ gitlabId }: Props) => {
-	const { data: gitlab } = api.gitlab.one.useQuery(
+	const { data: gitlab, refetch } = api.gitlab.one.useQuery(
 		{
 			gitlabId,
 		},
@@ -51,12 +59,14 @@ export const EditGitlabProvider = ({ gitlabId }: Props) => {
 	const utils = api.useUtils();
 	const [isOpen, setIsOpen] = useState(false);
 	const { mutateAsync, error, isError } = api.gitlab.update.useMutation();
-	const { mutateAsync: testConnection, isLoading } =
+	const { mutateAsync: testConnection, isPending } =
 		api.gitlab.testConnection.useMutation();
-	const form = useForm<Schema>({
+	const form = useForm({
 		defaultValues: {
 			groupName: "",
 			name: "",
+			gitlabUrl: "https://gitlab.com",
+			gitlabInternalUrl: "",
 		},
 		resolver: zodResolver(Schema),
 	});
@@ -67,6 +77,8 @@ export const EditGitlabProvider = ({ gitlabId }: Props) => {
 		form.reset({
 			groupName: gitlab?.groupName || "",
 			name: gitlab?.gitProvider.name || "",
+			gitlabUrl: gitlab?.gitlabUrl || "",
+			gitlabInternalUrl: gitlab?.gitlabInternalUrl || "",
 		});
 	}, [form, isOpen]);
 
@@ -76,28 +88,35 @@ export const EditGitlabProvider = ({ gitlabId }: Props) => {
 			gitProviderId: gitlab?.gitProviderId || "",
 			groupName: data.groupName || "",
 			name: data.name || "",
+			gitlabUrl: data.gitlabUrl || "",
+			gitlabInternalUrl: data.gitlabInternalUrl ?? null,
 		})
 			.then(async () => {
 				await utils.gitProvider.getAll.invalidate();
 				toast.success("Gitlab updated successfully");
 				setIsOpen(false);
+				refetch();
 			})
 			.catch(() => {
-				toast.error("Error to update Gitlab");
+				toast.error("Error updating Gitlab");
 			});
 	};
 
 	return (
 		<Dialog open={isOpen} onOpenChange={setIsOpen}>
 			<DialogTrigger asChild>
-				<Button variant="ghost">
-					<Edit className="size-4" />
+				<Button
+					variant="ghost"
+					size="icon"
+					className="group hover:bg-blue-500/10 "
+				>
+					<PenBoxIcon className="size-3.5  text-primary group-hover:text-blue-500" />
 				</Button>
 			</DialogTrigger>
-			<DialogContent className="sm:max-w-2xl  overflow-y-auto max-h-screen">
+			<DialogContent className="sm:max-w-2xl ">
 				<DialogHeader>
 					<DialogTitle className="flex items-center gap-2">
-						Update GitLab Provider <GitlabIcon className="size-5" />
+						Update GitLab <GitlabIcon className="size-5" />
 					</DialogTitle>
 				</DialogHeader>
 
@@ -126,16 +145,54 @@ export const EditGitlabProvider = ({ gitlabId }: Props) => {
 										</FormItem>
 									)}
 								/>
+								<FormField
+									control={form.control}
+									name="gitlabUrl"
+									render={({ field }) => (
+										<FormItem>
+											<FormLabel>Gitlab Url</FormLabel>
+											<FormControl>
+												<Input placeholder="https://gitlab.com" {...field} />
+											</FormControl>
+											<FormMessage />
+										</FormItem>
+									)}
+								/>
+
+								<FormField
+									control={form.control}
+									name="gitlabInternalUrl"
+									render={({ field }) => (
+										<FormItem>
+											<FormLabel>Internal URL (Optional)</FormLabel>
+											<FormControl>
+												<Input
+													placeholder="http://gitlab:80"
+													{...field}
+													value={field.value ?? ""}
+												/>
+											</FormControl>
+											<FormDescription>
+												Use when GitLab runs on the same instance as Dokploy.
+												Used for OAuth token exchange to reach GitLab via
+												internal network (e.g. Docker service name).
+											</FormDescription>
+											<FormMessage />
+										</FormItem>
+									)}
+								/>
 
 								<FormField
 									control={form.control}
 									name="groupName"
 									render={({ field }) => (
 										<FormItem>
-											<FormLabel>Group Name (Optional)</FormLabel>
+											<FormLabel>
+												Group Name (Optional, Comma-Separated List)
+											</FormLabel>
 											<FormControl>
 												<Input
-													placeholder="For organization/group access use the slugish name of the group eg: my-org"
+													placeholder="For organization/group access use the slug name of the group eg: my-org"
 													{...field}
 												/>
 											</FormControl>
@@ -144,11 +201,11 @@ export const EditGitlabProvider = ({ gitlabId }: Props) => {
 									)}
 								/>
 
-								<div className="flex w-full justify-end gap-4 mt-4">
+								<div className="flex w-full justify-between gap-4 mt-4">
 									<Button
 										type="button"
 										variant={"secondary"}
-										isLoading={isLoading}
+										isLoading={isPending}
 										onClick={async () => {
 											await testConnection({
 												gitlabId,

@@ -1,3 +1,29 @@
+import {
+	type ColumnFiltersState,
+	flexRender,
+	getCoreRowModel,
+	getFilteredRowModel,
+	getSortedRowModel,
+	type PaginationState,
+	type SortingState,
+	useReactTable,
+	type VisibilityState,
+} from "@tanstack/react-table";
+import copy from "copy-to-clipboard";
+import {
+	CheckCircle2Icon,
+	ChevronDown,
+	Copy,
+	Download,
+	Globe,
+	InfoIcon,
+	Loader2,
+	Server,
+	TrendingUpIcon,
+} from "lucide-react";
+import { useMemo, useState } from "react";
+import { toast } from "sonner";
+import { AlertBlock } from "@/components/shared/alert-block";
 import { Badge } from "@/components/ui/badge";
 import { Button } from "@/components/ui/button";
 import {
@@ -24,30 +50,6 @@ import {
 	TableRow,
 } from "@/components/ui/table";
 import { api } from "@/utils/api";
-import {
-	type ColumnFiltersState,
-	type PaginationState,
-	type SortingState,
-	type VisibilityState,
-	flexRender,
-	getCoreRowModel,
-	getFilteredRowModel,
-	getSortedRowModel,
-	useReactTable,
-} from "@tanstack/react-table";
-import copy from "copy-to-clipboard";
-import {
-	CheckCircle2Icon,
-	ChevronDown,
-	Copy,
-	Download,
-	Globe,
-	InfoIcon,
-	Server,
-	TrendingUpIcon,
-} from "lucide-react";
-import { useMemo, useState } from "react";
-import { toast } from "sonner";
 import { columns, getStatusColor } from "./columns";
 import type { LogEntry } from "./show-requests";
 import { DataTableFacetedFilter } from "./status-request-filter";
@@ -79,7 +81,15 @@ export const priorities = [
 		icon: Server,
 	},
 ];
-export const RequestsTable = () => {
+
+export interface RequestsTableProps {
+	dateRange?: {
+		from: Date | undefined;
+		to: Date | undefined;
+	};
+}
+
+export const RequestsTable = ({ dateRange }: RequestsTableProps) => {
 	const [statusFilter, setStatusFilter] = useState<string[]>([]);
 	const [search, setSearch] = useState("");
 	const [selectedRow, setSelectedRow] = useState<LogEntry>();
@@ -92,12 +102,23 @@ export const RequestsTable = () => {
 		pageSize: 10,
 	});
 
-	const { data: statsLogs, isLoading } = api.settings.readStatsLogs.useQuery(
+	const {
+		data: statsLogs,
+		isLoading,
+		isError,
+		error,
+	} = api.settings.readStatsLogs.useQuery(
 		{
 			sort: sorting[0],
 			page: pagination,
 			search,
 			status: statusFilter,
+			dateRange: dateRange
+				? {
+						start: dateRange.from?.toISOString(),
+						end: dateRange.to?.toISOString(),
+					}
+				: undefined,
 		},
 		{
 			refetchInterval: 1333,
@@ -138,7 +159,15 @@ export const RequestsTable = () => {
 			return JSON.stringify(value, null, 2);
 		}
 		if (key === "Duration" || key === "OriginDuration" || key === "Overhead") {
-			return `${value / 1000000000} s`;
+			const nanos = Number(value);
+			const ms = nanos / 1000000;
+			if (ms < 1) {
+				return `${(nanos / 1000).toFixed(2)} µs`;
+			}
+			if (ms < 1000) {
+				return `${ms.toFixed(2)} ms`;
+			}
+			return `${(ms / 1000).toFixed(2)} s`;
 		}
 		if (key === "level") {
 			return <Badge variant="secondary">{value}</Badge>;
@@ -147,7 +176,11 @@ export const RequestsTable = () => {
 			return <Badge variant="outline">{value}</Badge>;
 		}
 		if (key === "DownstreamStatus" || key === "OriginStatus") {
-			return <Badge variant={getStatusColor(value)}>{value}</Badge>;
+			const num = Number(value);
+			if (num === 0) {
+				return <Badge variant="secondary">N/A</Badge>;
+			}
+			return <Badge variant={getStatusColor(num)}>{value}</Badge>;
 		}
 		return value;
 	};
@@ -156,10 +189,10 @@ export const RequestsTable = () => {
 		<>
 			<div className="flex flex-col gap-6 w-full ">
 				<div className="mt-6 grid gap-4 pb-20 w-full">
-					<div className="flex flex-col gap-4  w-full overflow-auto">
+					<div className="flex flex-col gap-4 w-full overflow-auto">
 						<div className="flex items-center gap-2 max-sm:flex-wrap">
 							<Input
-								placeholder="Filter by name..."
+								placeholder="Filter by hostname..."
 								value={search}
 								onChange={(event) => setSearch(event.target.value)}
 								className="md:max-w-sm"
@@ -247,7 +280,18 @@ export const RequestsTable = () => {
 												colSpan={columns.length}
 												className="h-24 text-center"
 											>
-												{statsLogs?.data.length === 0 && (
+												{isLoading ? (
+													<div className="w-full flex gap-4 items-center justify-center h-[55vh] text-muted-foreground">
+														<Loader2 className="size-4 animate-spin" />
+														<span>Loading requests...</span>
+													</div>
+												) : isError ? (
+													<div className="w-full flex items-center justify-center h-[55vh]">
+														<AlertBlock type="error" className="w-full">
+															{error?.message}
+														</AlertBlock>
+													</div>
+												) : (
 													<div className="w-full flex-col gap-2 flex items-center justify-center h-[55vh]">
 														<span className="text-muted-foreground text-lg font-medium">
 															No results.
@@ -300,23 +344,23 @@ export const RequestsTable = () => {
 			</div>
 			<Sheet
 				open={!!selectedRow}
-				onOpenChange={(open) => setSelectedRow(undefined)}
+				onOpenChange={(_open) => setSelectedRow(undefined)}
 			>
-				<SheetContent className="sm:max-w-[740px]  flex flex-col">
+				<SheetContent className="w-full sm:max-w-[740px]! flex flex-col">
 					<SheetHeader>
 						<SheetTitle>Request log</SheetTitle>
 						<SheetDescription>
 							Details of the request log entry.
 						</SheetDescription>
 					</SheetHeader>
-					<ScrollArea className="flex-grow mt-4 pr-4">
+					<ScrollArea className="grow mt-4 pr-4">
 						<div className="border rounded-md">
 							<Table>
 								<TableBody>
 									{Object.entries(selectedRow || {}).map(([key, value]) => (
 										<TableRow key={key}>
 											<TableCell className="font-medium">{key}</TableCell>
-											<TableCell className="truncate break-words break-before-all whitespace-pre-wrap">
+											<TableCell className="truncate wrap-break-word break-before-all whitespace-pre-wrap">
 												{key === "RequestAddr" ? (
 													<div className="flex items-center gap-2 bg-muted p-1 rounded">
 														<span>{value}</span>

@@ -1,6 +1,6 @@
+import { toast } from "sonner";
+import { UpdateServerIp } from "@/components/dashboard/settings/web-server/update-server-ip";
 import { Button } from "@/components/ui/button";
-import React from "react";
-
 import {
 	DropdownMenu,
 	DropdownMenuContent,
@@ -11,17 +11,21 @@ import {
 	DropdownMenuTrigger,
 } from "@/components/ui/dropdown-menu";
 import { api } from "@/utils/api";
-import { toast } from "sonner";
 import { ShowModalLogs } from "../../web-server/show-modal-logs";
+import { TerminalModal } from "../../web-server/terminal-modal";
+import { GPUSupportModal } from "../gpu-support-modal";
 
 export const ShowDokployActions = () => {
-	const { mutateAsync: reloadServer, isLoading } =
+	const { mutateAsync: reloadServer, isPending } =
 		api.settings.reloadServer.useMutation();
+
+	const { mutateAsync: cleanAllDeploymentQueue } =
+		api.settings.cleanAllDeploymentQueue.useMutation();
 
 	return (
 		<DropdownMenu>
-			<DropdownMenuTrigger asChild disabled={isLoading}>
-				<Button isLoading={isLoading} variant="outline">
+			<DropdownMenuTrigger asChild disabled={isPending}>
+				<Button isLoading={isPending} variant="outline">
 					Server
 				</Button>
 			</DropdownMenuTrigger>
@@ -39,12 +43,45 @@ export const ShowDokployActions = () => {
 									toast.success("Server Reloaded");
 								});
 						}}
+						className="cursor-pointer"
 					>
 						<span>Reload</span>
 					</DropdownMenuItem>
+					<TerminalModal serverId="local">
+						<span>Terminal</span>
+					</TerminalModal>
 					<ShowModalLogs appName="dokploy">
-						<span>Watch logs</span>
+						<DropdownMenuItem
+							className="cursor-pointer"
+							onSelect={(e) => e.preventDefault()}
+						>
+							View Logs
+						</DropdownMenuItem>
 					</ShowModalLogs>
+					<GPUSupportModal />
+					<UpdateServerIp>
+						<DropdownMenuItem
+							className="cursor-pointer"
+							onSelect={(e) => e.preventDefault()}
+						>
+							Update Server IP
+						</DropdownMenuItem>
+					</UpdateServerIp>
+
+					<DropdownMenuItem
+						className="cursor-pointer"
+						onClick={async () => {
+							await cleanAllDeploymentQueue()
+								.then(() => {
+									toast.success("Deployment queue cleaned");
+								})
+								.catch(() => {
+									toast.error("Error cleaning deployment queue");
+								});
+						}}
+					>
+						Clean all deployment queue
+					</DropdownMenuItem>
 				</DropdownMenuGroup>
 			</DropdownMenuContent>
 		</DropdownMenu>

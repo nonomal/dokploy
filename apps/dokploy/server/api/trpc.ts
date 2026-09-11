@@ -8,19 +8,20 @@
  */
 
 // import { getServerAuthSession } from "@/server/auth";
-import { db } from "@/server/db";
-import { validateBearerToken, validateRequest } from "@dokploy/server";
+import { db } from "@dokploy/server/db";
+import { hasValidLicense } from "@dokploy/server/index";
+import type { statements } from "@dokploy/server/lib/access-control";
+import { validateRequest } from "@dokploy/server/lib/auth";
+import { checkPermission } from "@dokploy/server/services/permission";
 import type { OpenApiMeta } from "@dokploy/trpc-openapi";
-import { TRPCError, initTRPC } from "@trpc/server";
+import { initTRPC, TRPCError } from "@trpc/server";
 import type { CreateNextContextOptions } from "@trpc/server/adapters/next";
-import {
-	experimental_createMemoryUploadHandler,
-	experimental_isMultipartFormDataRequest,
-	experimental_parseMultipartFormData,
-} from "@trpc/server/adapters/node-http/content-type/form-data";
-import type { Session, User } from "lucia";
+import type { Session, User } from "better-auth";
 import superjson from "superjson";
 import { ZodError } from "zod";
+
+type Resource = keyof typeof statements;
+type ActionOf<R extends Resource> = (typeof statements)[R][number];
 
 /**
  * 1. CONTEXT
@@ -31,8 +32,17 @@ import { ZodError } from "zod";
  */
 
 interface CreateContextOptions {
-	user: (User & { authId: string; adminId: string }) | null;
-	session: Session | null;
+	user:
+		| (User & {
+				role: "member" | "admin" | "owner";
+				ownerId: string;
+				enableEnterpriseFeatures: boolean;
+				isValidEnterpriseLicense: boolean;
+		  })
+		| null;
+	session:
+		| (Session & { activeOrganizationId: string; impersonatedBy?: string })
+		| null;
 	req: CreateNextContextOptions["req"];
 	res: CreateNextContextOptions["res"];
 }
@@ -66,30 +76,29 @@ const createInnerTRPCContext = (opts: CreateContextOptions) => {
 export const createTRPCContext = async (opts: CreateNextContextOptions) => {
 	const { req, res } = opts;
 
-	let { session, user } = await validateBearerToken(req);
-
-	if (!session) {
-		const cookieResult = await validateRequest(req, res);
-		session = cookieResult.session;
-		user = cookieResult.user;
-	}
+	// Get from the request
+	const { session, user } = await validateRequest(req);
 
 	return createInnerTRPCContext({
 		req,
 		res,
-		session: session,
-		...((user && {
-			user: {
-				authId: user.id,
-				email: user.email,
-				rol: user.rol,
-				id: user.id,
-				secret: user.secret,
-				adminId: user.adminId,
-			},
-		}) || {
-			user: null,
-		}),
+		// @ts-ignore
+		session: session
+			? {
+					...session,
+					activeOrganizationId: session.activeOrganizationId || "",
+				}
+			: null,
+		// @ts-ignore
+		user: user
+			? {
+					...user,
+					email: user.email,
+					role: user.role as "owner" | "member" | "admin",
+					id: user.id,
+					ownerId: user.ownerId,
+				}
+			: null,
 	});
 };
 
@@ -97,7 +106,7 @@ export const createTRPCContext = async (opts: CreateNextContextOptions) => {
  * 2. INITIALIZATION
  *
  * This is where the tRPC API is initialized, connecting the context and transformer. We also parse
- * ZodErrors so that you get typesafety on the frontend if your procedure fails due to validation
+ * ZodErrors so that you get type safety on the frontend if your procedure fails due to validation
  * errors on the backend.
  */
 
@@ -163,26 +172,12 @@ export const protectedProcedure = t.procedure.use(({ ctx, next }) => {
 	});
 });
 
-export const uploadProcedure = async (opts: any) => {
-	if (!experimental_isMultipartFormDataRequest(opts.ctx.req)) {
-		return opts.next();
-	}
-
-	const formData = await experimental_parseMultipartFormData(
-		opts.ctx.req,
-		experimental_createMemoryUploadHandler({
-			// 2GB
-			maxPartSize: 1024 * 1024 * 1024 * 2,
-		}),
-	);
-
-	return opts.next({
-		rawInput: formData,
-	});
-};
-
 export const cliProcedure = t.procedure.use(({ ctx, next }) => {
-	if (!ctx.session || !ctx.user || ctx.user.rol !== "admin") {
+	if (
+		!ctx.session ||
+		!ctx.user ||
+		(ctx.user.role !== "owner" && ctx.user.role !== "admin")
+	) {
 		throw new TRPCError({ code: "UNAUTHORIZED" });
 	}
 	return next({
@@ -196,7 +191,11 @@ export const cliProcedure = t.procedure.use(({ ctx, next }) => {
 });
 
 export const adminProcedure = t.procedure.use(({ ctx, next }) => {
-	if (!ctx.session || !ctx.user || ctx.user.rol !== "admin") {
+	if (
+		!ctx.session ||
+		!ctx.user ||
+		(ctx.user.role !== "owner" && ctx.user.role !== "admin")
+	) {
 		throw new TRPCError({ code: "UNAUTHORIZED" });
 	}
 	return next({
@@ -208,3 +207,59 @@ export const adminProcedure = t.procedure.use(({ ctx, next }) => {
 		},
 	});
 });
+
+/**
+ * Requires admin/owner role AND enterprise enabled with a license key in DB.
+ * Does NOT call the license server on every request; full validation (haveValidLicenseKey)
+ * is used in the UI gate and when activating/validating keys.
+ */
+export const enterpriseProcedure = t.procedure.use(async ({ ctx, next }) => {
+	if (
+		!ctx.session ||
+		!ctx.user ||
+		(ctx.user.role !== "owner" && ctx.user.role !== "admin")
+	) {
+		throw new TRPCError({ code: "UNAUTHORIZED" });
+	}
+
+	const hasValidLicenseResult = await hasValidLicense(
+		ctx.session.activeOrganizationId,
+	);
+
+	if (!hasValidLicenseResult) {
+		throw new TRPCError({
+			code: "FORBIDDEN",
+			message: "Valid enterprise license required",
+		});
+	}
+
+	return next({
+		ctx: {
+			session: ctx.session,
+			user: ctx.user,
+		},
+	});
+});
+
+/**
+ * Permission-checked procedure factory.
+ *
+ * Verifies the caller has the required resource+action permission before the
+ * handler runs. Works for all role types:
+ * - owner / admin  → always granted (static roles, no license needed)
+ * - member         → legacy boolean fields (no license needed)
+ * - custom role    → enterprise license verified automatically inside resolveRole
+ *
+ * Usage:
+ *   create: withPermission("project", "create")
+ *     .input(...)
+ *     .mutation(async ({ ctx, input }) => { ... })
+ */
+export const withPermission = <R extends Resource>(
+	resource: R,
+	action: ActionOf<R>,
+) =>
+	protectedProcedure.use(async ({ ctx, next }) => {
+		await checkPermission(ctx, { [resource]: [action] } as any);
+		return next();
+	});

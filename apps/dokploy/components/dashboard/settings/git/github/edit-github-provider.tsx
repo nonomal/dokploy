@@ -1,3 +1,9 @@
+import { standardSchemaResolver as zodResolver } from "@hookform/resolvers/standard-schema";
+import { PenBoxIcon } from "lucide-react";
+import { useEffect, useState } from "react";
+import { useForm } from "react-hook-form";
+import { toast } from "sonner";
+import { z } from "zod";
 import { GithubIcon } from "@/components/icons/data-tools-icons";
 import { AlertBlock } from "@/components/shared/alert-block";
 import { Button } from "@/components/ui/button";
@@ -19,16 +25,13 @@ import {
 } from "@/components/ui/form";
 import { Input } from "@/components/ui/input";
 import { api } from "@/utils/api";
-import { zodResolver } from "@hookform/resolvers/zod";
-import { Edit } from "lucide-react";
-import { useEffect, useState } from "react";
-import { useForm } from "react-hook-form";
-import { toast } from "sonner";
-import { z } from "zod";
 
 const Schema = z.object({
 	name: z.string().min(1, {
 		message: "Name is required",
+	}),
+	appName: z.string().min(1, {
+		message: "App Name is required",
 	}),
 });
 
@@ -50,11 +53,12 @@ export const EditGithubProvider = ({ githubId }: Props) => {
 	const utils = api.useUtils();
 	const [isOpen, setIsOpen] = useState(false);
 	const { mutateAsync, error, isError } = api.github.update.useMutation();
-	const { mutateAsync: testConnection, isLoading } =
+	const { mutateAsync: testConnection, isPending } =
 		api.github.testConnection.useMutation();
 	const form = useForm<Schema>({
 		defaultValues: {
 			name: "",
+			appName: "",
 		},
 		resolver: zodResolver(Schema),
 	});
@@ -62,6 +66,7 @@ export const EditGithubProvider = ({ githubId }: Props) => {
 	useEffect(() => {
 		form.reset({
 			name: github?.gitProvider.name || "",
+			appName: github?.githubAppName || "",
 		});
 	}, [form, isOpen]);
 
@@ -70,6 +75,7 @@ export const EditGithubProvider = ({ githubId }: Props) => {
 			githubId,
 			name: data.name || "",
 			gitProviderId: github?.gitProviderId || "",
+			githubAppName: data.appName || "",
 		})
 			.then(async () => {
 				await utils.gitProvider.getAll.invalidate();
@@ -77,21 +83,25 @@ export const EditGithubProvider = ({ githubId }: Props) => {
 				setIsOpen(false);
 			})
 			.catch(() => {
-				toast.error("Error to update Github");
+				toast.error("Error updating Github");
 			});
 	};
 
 	return (
 		<Dialog open={isOpen} onOpenChange={setIsOpen}>
 			<DialogTrigger asChild>
-				<Button variant="ghost">
-					<Edit className="size-4" />
+				<Button
+					variant="ghost"
+					size="icon"
+					className="group hover:bg-blue-500/10 "
+				>
+					<PenBoxIcon className="size-3.5  text-primary group-hover:text-blue-500" />
 				</Button>
 			</DialogTrigger>
-			<DialogContent className="sm:max-w-2xl  overflow-y-auto max-h-screen">
+			<DialogContent className="sm:max-w-2xl ">
 				<DialogHeader>
 					<DialogTitle className="flex items-center gap-2">
-						Update Github Provider <GithubIcon className="size-5" />
+						Update Github <GithubIcon className="size-5" />
 					</DialogTitle>
 				</DialogHeader>
 
@@ -120,12 +130,37 @@ export const EditGithubProvider = ({ githubId }: Props) => {
 										</FormItem>
 									)}
 								/>
+								<FormField
+									control={form.control}
+									name="appName"
+									render={({ field }) => (
+										<FormItem>
+											<FormLabel>App Name</FormLabel>
+											<FormControl>
+												<Input
+													placeholder="pp Name eg(my-personal)"
+													{...field}
+												/>
+											</FormControl>
+											<FormMessage />
+										</FormItem>
+									)}
+								/>
 
-								<div className="flex w-full justify-end gap-4 mt-4">
+								<div className="flex flex-col gap-2">
+									<span className="text-sm font-medium">GitHub URL</span>
+									<Input value={github?.githubUrl ?? ""} readOnly />
+									<span className="text-muted-foreground text-xs">
+										Set when the app was created and not editable, the app
+										credentials belong to this instance.
+									</span>
+								</div>
+
+								<div className="flex w-full justify-between gap-4 mt-4">
 									<Button
 										type="button"
 										variant={"secondary"}
-										isLoading={isLoading}
+										isLoading={isPending}
 										onClick={async () => {
 											await testConnection({
 												githubId,

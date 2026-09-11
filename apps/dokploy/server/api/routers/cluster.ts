@@ -1,76 +1,147 @@
-import { getPublicIpWithFallback } from "@/server/wss/terminal";
-import { type DockerNode, IS_CLOUD, docker, execAsync } from "@dokploy/server";
+import {
+	type DockerNode,
+	execAsync,
+	execAsyncRemote,
+	findServerById,
+	getRemoteDocker,
+} from "@dokploy/server";
 import { TRPCError } from "@trpc/server";
+import { quote } from "shell-quote";
 import { z } from "zod";
-import { createTRPCRouter, protectedProcedure } from "../trpc";
+import { audit } from "@/server/api/utils/audit";
+import { getLocalServerIp } from "@/server/wss/terminal";
+import { createTRPCRouter, withPermission } from "../trpc";
 
 export const clusterRouter = createTRPCRouter({
-	getNodes: protectedProcedure.query(async () => {
-		if (IS_CLOUD) {
-			return [];
-		}
-		const workers: DockerNode[] = await docker.listNodes();
+	getNodes: withPermission("docker", "read")
+		.input(
+			z.object({
+				serverId: z.string().optional(),
+			}),
+		)
+		.query(async ({ input, ctx }) => {
+			if (input.serverId) {
+				const targetServer = await findServerById(input.serverId);
+				if (targetServer.organizationId !== ctx.session.activeOrganizationId) {
+					throw new TRPCError({
+						code: "UNAUTHORIZED",
+						message: "You don't have access to this server.",
+					});
+				}
+			}
+			const docker = await getRemoteDocker(input.serverId);
+			const workers: DockerNode[] = await docker.listNodes();
+			return workers;
+		}),
 
-		return workers;
-	}),
-	removeWorker: protectedProcedure
+	removeWorker: withPermission("server", "delete")
 		.input(
 			z.object({
 				nodeId: z.string(),
+				serverId: z.string().optional(),
 			}),
 		)
-		.mutation(async ({ input }) => {
-			if (IS_CLOUD) {
-				throw new TRPCError({
-					code: "UNAUTHORIZED",
-					message: "Functionality not available in cloud version",
-				});
+		.mutation(async ({ input, ctx }) => {
+			if (input.serverId) {
+				const targetServer = await findServerById(input.serverId);
+				if (targetServer.organizationId !== ctx.session.activeOrganizationId) {
+					throw new TRPCError({
+						code: "UNAUTHORIZED",
+						message: "You don't have access to this server.",
+					});
+				}
 			}
 			try {
-				await execAsync(
-					`docker node update --availability drain ${input.nodeId}`,
-				);
-				await execAsync(`docker node rm ${input.nodeId} --force`);
+				const drainCommand = `docker node update --availability drain ${quote([input.nodeId])}`;
+				const removeCommand = `docker node rm ${quote([input.nodeId])} --force`;
+
+				if (input.serverId) {
+					await execAsyncRemote(input.serverId, drainCommand);
+					await execAsyncRemote(input.serverId, removeCommand);
+				} else {
+					await execAsync(drainCommand);
+					await execAsync(removeCommand);
+				}
+				await audit(ctx, {
+					action: "delete",
+					resourceType: "cluster",
+					resourceId: input.nodeId,
+					resourceName: input.nodeId,
+				});
 				return true;
 			} catch (error) {
 				throw new TRPCError({
 					code: "INTERNAL_SERVER_ERROR",
-					message: "Error to remove the node",
+					message: "Error removing the node",
 					cause: error,
 				});
 			}
 		}),
-	addWorker: protectedProcedure.query(async ({ input }) => {
-		if (IS_CLOUD) {
-			return {
-				command: "",
-				version: "",
-			};
-		}
-		const result = await docker.swarmInspect();
-		const docker_version = await docker.version();
 
-		return {
-			command: `docker swarm join --token ${
-				result.JoinTokens.Worker
-			} ${await getPublicIpWithFallback()}:2377`,
-			version: docker_version.Version,
-		};
-	}),
-	addManager: protectedProcedure.query(async ({ input }) => {
-		if (IS_CLOUD) {
+	addWorker: withPermission("server", "create")
+		.input(
+			z.object({
+				serverId: z.string().optional(),
+			}),
+		)
+		.query(async ({ input, ctx }) => {
+			if (input.serverId) {
+				const targetServer = await findServerById(input.serverId);
+				if (targetServer.organizationId !== ctx.session.activeOrganizationId) {
+					throw new TRPCError({
+						code: "UNAUTHORIZED",
+						message: "You don't have access to this server.",
+					});
+				}
+			}
+			const docker = await getRemoteDocker(input.serverId);
+			const result = await docker.swarmInspect();
+			const docker_version = await docker.version();
+			const info = await docker.info();
+
+			const swarmNodeAddr = info?.Swarm?.NodeAddr;
+			let ip = swarmNodeAddr || (await getLocalServerIp());
+			if (!swarmNodeAddr && input.serverId) {
+				const server = await findServerById(input.serverId);
+				ip = server?.ipAddress;
+			}
+
 			return {
-				command: "",
-				version: "",
+				command: `docker swarm join --token ${result.JoinTokens.Worker} ${ip}:2377`,
+				version: docker_version.Version,
 			};
-		}
-		const result = await docker.swarmInspect();
-		const docker_version = await docker.version();
-		return {
-			command: `docker swarm join --token ${
-				result.JoinTokens.Manager
-			} ${await getPublicIpWithFallback()}:2377`,
-			version: docker_version.Version,
-		};
-	}),
+		}),
+
+	addManager: withPermission("server", "create")
+		.input(
+			z.object({
+				serverId: z.string().optional(),
+			}),
+		)
+		.query(async ({ input, ctx }) => {
+			if (input.serverId) {
+				const targetServer = await findServerById(input.serverId);
+				if (targetServer.organizationId !== ctx.session.activeOrganizationId) {
+					throw new TRPCError({
+						code: "UNAUTHORIZED",
+						message: "You don't have access to this server.",
+					});
+				}
+			}
+			const docker = await getRemoteDocker(input.serverId);
+			const result = await docker.swarmInspect();
+			const docker_version = await docker.version();
+			const info = await docker.info();
+
+			const swarmNodeAddr = info?.Swarm?.NodeAddr;
+			let ip = swarmNodeAddr || (await getLocalServerIp());
+			if (!swarmNodeAddr && input.serverId) {
+				const server = await findServerById(input.serverId);
+				ip = server?.ipAddress;
+			}
+			return {
+				command: `docker swarm join --token ${result.JoinTokens.Manager} ${ip}:2377`,
+				version: docker_version.Version,
+			};
+		}),
 });

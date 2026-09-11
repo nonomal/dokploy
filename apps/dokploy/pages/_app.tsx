@@ -1,19 +1,21 @@
 import "@/styles/globals.css";
 
-import { Toaster } from "@/components/ui/sonner";
-import { api } from "@/utils/api";
 import type { NextPage } from "next";
-import { ThemeProvider } from "next-themes";
 import type { AppProps } from "next/app";
 import { Inter } from "next/font/google";
-import Head from "next/head";
+import { ThemeProvider } from "next-themes";
+import NextTopLoader from "nextjs-toploader";
 import type { ReactElement, ReactNode } from "react";
+import { SearchCommand } from "@/components/dashboard/search-command";
+import { Analytics } from "@/components/shared/analytics";
+import { Toaster } from "@/components/ui/sonner";
+import { TooltipProvider } from "@/components/ui/tooltip";
+import { api } from "@/utils/api";
 
 const inter = Inter({ subsets: ["latin"] });
 
 export type NextPageWithLayout<P = {}, IP = P> = NextPage<P, IP> & {
 	getLayout?: (page: ReactElement) => ReactNode;
-	// session: Session | null;
 	theme?: string;
 };
 
@@ -26,26 +28,31 @@ const MyApp = ({
 	pageProps: { ...pageProps },
 }: AppPropsWithLayout) => {
 	const getLayout = Component.getLayout ?? ((page) => page);
+
 	return (
 		<>
-			<style jsx global>{`
-        :root {
-          --font-inter: ${inter.style.fontFamily};
-        }
-      `}</style>
-			<Head>
-				<title>Dokploy</title>
-			</Head>
-			<ThemeProvider
-				attribute="class"
-				defaultTheme="system"
-				enableSystem
-				disableTransitionOnChange
-				forcedTheme={Component.theme}
-			>
-				<Toaster richColors />
-				{getLayout(<Component {...pageProps} />)}
-			</ThemeProvider>
+			<style jsx global>
+				{`
+					:root {
+						--font-inter: ${inter.style.fontFamily};
+					}
+				`}
+			</style>
+			<TooltipProvider>
+				<ThemeProvider
+					attribute="class"
+					defaultTheme="system"
+					enableSystem
+					disableTransitionOnChange
+					forcedTheme={Component.theme}
+				>
+					<NextTopLoader color="hsl(var(--sidebar-ring))" />
+					<Analytics />
+					<Toaster richColors />
+					<SearchCommand />
+					{getLayout(<Component {...pageProps} />)}
+				</ThemeProvider>
+			</TooltipProvider>
 		</>
 	);
 };
